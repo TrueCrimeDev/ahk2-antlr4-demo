@@ -51,6 +51,7 @@ function categorize(t: any, prev: any, symbolic: (string | null)[]): Cat | null 
     const text: string = t.text ?? '';
     if (text.startsWith(';') || text.startsWith('/*')) return 'comment';
     if (name === 'StringLiteral') return 'string';
+    if (name === 'Text' || name === 'DirectiveString') return 'string'; // Directive argument, e.g. #Requires AutoHotkey v2.0
     if (name === 'DecimalLiteral' || name === 'HexIntegerLiteral') return 'number';
     if (KEYWORDS.has(name)) {
         if (prev && (prev.text === '.' || prev.text === '?.')) return null; // property name, e.g. obj.Base

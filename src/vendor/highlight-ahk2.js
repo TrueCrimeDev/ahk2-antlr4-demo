@@ -9,7 +9,8 @@
 // - Continuation-section strings ("\n(\n...\n)") are one string.
 // - Hotkey labels only match real hotkey syntax, so " :: " inside a string isn't a hotkey.
 // - Hotstrings: trigger is a symbol; auto-replace text is shown as text, not code.
-// - Any #Directive at the start of a line (but not a # hotkey like #c::).
+// - Any #Directive at the start of a line (but not a # hotkey like #c::); its argument is
+//   shown as a string, except #HotIf, whose argument is an expression.
 // - A ; comment needs whitespace or the start of a line before it, as in AutoHotkey.
 
 hljs.registerLanguage('ahk2', function(hljs) {
@@ -120,11 +121,29 @@ hljs.registerLanguage('ahk2', function(hljs) {
       // extends keyword
       EXTENDS_DEF,
 
-      // Directives - purple. Any #Name at the start of a line, except # hotkeys such as #c::
+      // #HotIf takes an expression, so its argument is highlighted as code.
+      {
+        className: 'meta',
+        begin: /^[ \t]*#hotif\b(?!::)/,
+        relevance: 10
+      },
+
+      // Other directives - purple. Any #Name at the start of a line, except # hotkeys such as #c::
+      // Their arguments are literal text (#Requires AutoHotkey v2.0, #Include <Lib>), shown as strings.
       {
         className: 'meta',
         begin: /^[ \t]*#[a-z_]\w*\b(?!::)/,
-        relevance: 10
+        relevance: 10,
+        starts: {
+          className: 'string',
+          end: /$/,
+          contains: [
+            hljs.COMMENT(/(?<=[ \t]);/, /$/),
+            // A lone number or true/false argument (#InputLevel 1, #UseHook true) keeps its own color.
+            { className: 'number', begin: /(?<=^[ \t]*#\w+[ \t]+)(?:0x[0-9a-f]+|\d+)(?=[ \t]*(?:;|$))/ },
+            { className: 'literal', begin: /(?<=^[ \t]*#\w+[ \t]+)(?:true|false)(?=[ \t]*(?:;|$))/ }
+          ]
+        }
       },
 
       // Continuation-section strings: an unclosed quote, then ( ... ) on the following lines
