@@ -2,8 +2,8 @@
   "name": "ahk2-antlr4-demo",
   "version": "1.0.0",
   "scripts": {
-    "start": "parcel index.html --open --dist-dir docs",
-    "build": "node -e \"require('fs').rmSync('docs',{recursive:true,force:true})\" && parcel build index.html --dist-dir docs --public-url ./ --no-source-maps",
+    "start": "parcel src/index.html --open",
+    "build": "node -e \"require('fs').rmSync('docs',{recursive:true,force:true})\" && parcel build src/index.html --dist-dir docs --public-url ./ --no-source-maps && node scripts/root-index.mjs",
     "test": "echo \"Error: no test specified\" && exit 1",
     "typecheck": "tsc --noEmit -p ."
   },

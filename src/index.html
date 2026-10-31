@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AHK v2 AST Explorer</title>
+    <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body data-tab="graph">
+    <header class="app-header">
+        <h1>AutoHotkey v2 AST Explorer</h1>
+        <p class="byline">
+            ANTLR4 grammar by <a href="https://github.com/Descolada/ahk2-antlr4-demo">Descolada</a>.
+            Fork with source linking, lint checks and extra views:
+            <a href="https://github.com/TrueCrimeDev/ahk2-antlr4-demo">TrueCrimeDev/ahk2-antlr4-demo</a>
+        </p>
+    </header>
+
+    <main class="container">
+        <section class="left">
+            <div class="editor-area">
+                <textarea id="input" rows="10" cols="60">; Type AutoHotkey v2 code here to see its AST.
+; Click a tree node to highlight its code, or move the cursor to find its node.
+
+#Requires AutoHotkey v2.0
+
+x := 1
+Pair(x, x := 2)        ; warning: x is read after x := 2 runs
+Pair(x + 0, x := 2)    ; fine: x + 0 is a new value
+
+Hotkey "F1", () => MsgBox("hi")   ; error: Hotkey passes 1 argument
+
+Pair(a*) => a
+</textarea>
+            </div>
+            <div class="left-controls">
+                <label><input type="checkbox" id="showAll"> Collapse to terminal nodes</label>
+                <span id="status" class="status"></span>
+            </div>
+            <section class="problems" aria-labelledby="problems-title">
+                <h2 id="problems-title">Problems <span id="problems-count" class="count"></span></h2>
+                <ul id="problems-list"></ul>
+                <details class="rules">
+                    <summary>Lint rules</summary>
+                    <ul id="rules-list"></ul>
+                </details>
+            </section>
+        </section>
+
+        <section class="right">
+            <div class="toolbar">
+                <div class="tabs" role="tablist">
+                    <button id="tab-graph" role="tab" aria-selected="true">Graph</button>
+                    <button id="tab-outline" role="tab" aria-selected="false">Outline</button>
+                    <button id="tab-tokens" role="tab" aria-selected="false">Tokens</button>
+                </div>
+                <div class="search only-tree">
+                    <input id="search" type="search" placeholder="Find node (e.g. assignment, &quot;x&quot;)" aria-label="Find node">
+                    <button id="search-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+                    <button id="search-next" title="Next match (Enter)" aria-label="Next match">↓</button>
+                    <span id="search-count" class="count"></span>
+                </div>
+                <div class="tool-group only-graph">
+                    <button id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+                    <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                    <button id="zoom-fit" title="Fit to view">Fit</button>
+                    <button id="zoom-100" title="Actual size">1:1</button>
+                </div>
+                <div class="tool-group only-outline">
+                    <button id="expand-all">Expand all</button>
+                    <button id="collapse-all">Collapse all</button>
+                </div>
+                <div class="tool-group only-tokens">
+                    <label><input type="checkbox" id="all-tokens"> All lexer tokens</label>
+                </div>
+            </div>
+            <div id="breadcrumb" class="breadcrumb hint"></div>
+            <div id="stale-banner" class="stale-banner" hidden>The code has a lexing error, so this is the last tree that parsed. See Problems.</div>
+            <div class="views">
+                <div id="graph" class="view graph" role="tabpanel" aria-labelledby="tab-graph"></div>
+                <div id="outline" class="view outline" role="tabpanel" aria-labelledby="tab-outline" hidden></div>
+                <div id="tokens" class="view tokens" role="tabpanel" aria-labelledby="tab-tokens" hidden></div>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./index.ts"></script>
+</body>
+
+</html>
