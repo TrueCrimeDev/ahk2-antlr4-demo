@@ -1,34 +1,82 @@
-<!DOCTYPE html><meta charset=utf-8><link rel=stylesheet href=https://unpkg.com/codemirror@5/lib/codemirror.css><script src=https://unpkg.com/codemirror@5/lib/codemirror.js></script><script src=https://unpkg.com/codemirror@5/mode/javascript/javascript.js></script><title>AHK v2.0 ANTLR4 Demo</title><style>html,body{height:100%;margin:0}body{box-sizing:border-box;flex-direction:column;padding:1rem;display:flex}.container{flex:auto;gap:1rem;min-height:0;display:flex}.editor-container{flex-direction:column;flex:0 0 40%;width:100%;max-width:40%;display:flex}.editor-area{flex-direction:column;flex:auto;min-height:0;display:flex}#controls{flex:none;padding-top:.5rem}#graph{flex:1}#input{flex:1;font-family:monospace}#graph{white-space:pre-wrap;word-wrap:break-word;border:1px solid #ccc;flex:1;padding:.5rem;font-family:monospace;overflow:auto}.CodeMirror{flex:1;width:100%!important;height:100%!important}.CodeMirror-scroll{overflow-x:auto}</style><body>
-    <h1>AutoHotkey v2.0 ANTLR4 Grammar Demo</h1>
-    <div class=container>
-        <div class=editor-container>
-            <div class=editor-area>
+<!DOCTYPE html><html lang=en><link rel=stylesheet href=ahk2-antlr4-demo.1d7ec983.css><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><title>AHK v2 AST Explorer</title><link rel=icon href=data:,><link rel=stylesheet href=ahk2-antlr4-demo.938fb51f.css><body data-tab=graph>
+    <header class=app-header>
+        <h1>AutoHotkey v2 AST Explorer</h1>
+        <p class=byline>
+            ANTLR4 grammar by <a href=https://github.com/Descolada/ahk2-antlr4-demo>Descolada</a>.
+            Fork with source linking, lint checks and extra views:
+            <a href=https://github.com/TrueCrimeDev/ahk2-antlr4-demo>TrueCrimeDev/ahk2-antlr4-demo</a>
+        </p>
+    </header>
 
-            <textarea id=input rows=10 cols=60>; Start typing here to show AST
+    <main class=container>
+        <section class=left>
+            <div class=editor-area>
+                <textarea id=input rows=10 cols=60>; Type AutoHotkey v2 code here to see its AST.
+; Click a tree node to highlight its code, or move the cursor to find its node.
 
 #Requires AutoHotkey v2.0
 
-if (a) {
-    MsgBox "Hello world"
-}
-            </textarea>
-        </div>
-        <div id=controls>
-            <label style="font:12px system-ui,sans-serif">
-                <input type=checkbox id=showAll>
-                Collapse to terminal nodes
-            </label>
-        </div>
-        </div>
-        <div id=graph>
-            
-        </div>
-    </div>
+x := 1
+Pair(x, x := 2)        ; warning: x is read after x := 2 runs
+Pair(x + 0, x := 2)    ; fine: x + 0 is a new value
 
-    
-    <script src=https://unpkg.com/viz.js@2.1.2/viz.js></script>
-    <script src=https://unpkg.com/viz.js@2.1.2/full.render.js></script>
+Hotkey "F1", () =&gt; MsgBox("hi")   ; error: Hotkey passes 1 argument
 
-    <script type=module src=ahk2-antlr4-demo.8019ccb2.js></script>
+Pair(a*) =&gt; a
+</textarea>
+            </div>
+            <div class=left-controls>
+                <label><input type=checkbox id=showAll> Collapse to terminal nodes</label>
+                <span id=status class=status></span>
+            </div>
+            <section class=problems aria-labelledby=problems-title>
+                <h2 id=problems-title>Problems <span id=problems-count class=count></span></h2>
+                <ul id=problems-list></ul>
+                <details class=rules>
+                    <summary>Lint rules</summary>
+                    <ul id=rules-list></ul>
+                </details>
+            </section>
+        </section>
+
+        <section class=right>
+            <div class=toolbar>
+                <div class=tabs role=tablist>
+                    <button id=tab-graph role=tab aria-selected=true>Graph</button>
+                    <button id=tab-outline role=tab aria-selected=false>Outline</button>
+                    <button id=tab-tokens role=tab aria-selected=false>Tokens</button>
+                </div>
+                <div class="only-tree search">
+                    <input id=search type=search placeholder="Find node (e.g. assignment, &quot;x&quot;)" aria-label="Find node">
+                    <button id=search-prev title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+                    <button id=search-next title="Next match (Enter)" aria-label="Next match">↓</button>
+                    <span id=search-count class=count></span>
+                </div>
+                <div class="only-graph tool-group">
+                    <button id=zoom-out title="Zoom out" aria-label="Zoom out">−</button>
+                    <button id=zoom-in title="Zoom in" aria-label="Zoom in">+</button>
+                    <button id=zoom-fit title="Fit to view">Fit</button>
+                    <button id=zoom-100 title="Actual size">1:1</button>
+                </div>
+                <div class="only-outline tool-group">
+                    <button id=expand-all>Expand all</button>
+                    <button id=collapse-all>Collapse all</button>
+                </div>
+                <div class="only-tokens tool-group">
+                    <label><input type=checkbox id=all-tokens> All lexer tokens</label>
+                </div>
+            </div>
+            <div id=breadcrumb class="breadcrumb hint"></div>
+            <div id=stale-banner class=stale-banner hidden>The code has a lexing error, so this is the last tree that parsed. See Problems.</div>
+            <div class=views>
+                <div id=graph class="graph view" role=tabpanel aria-labelledby=tab-graph></div>
+                <div id=outline class="outline view" role=tabpanel aria-labelledby=tab-outline hidden></div>
+                <div id=tokens class="tokens view" role=tabpanel aria-labelledby=tab-tokens hidden></div>
+            </div>
+        </section>
+    </main>
+
+    <script type=module src=ahk2-antlr4-demo.cc98f9d3.js></script>
+
 
 

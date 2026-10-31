@@ -3,21 +3,25 @@
   "version": "1.0.0",
   "scripts": {
     "start": "parcel index.html --open --dist-dir docs",
-    "build": "parcel build index.html --dist-dir docs --public-url ./",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "node -e \"require('fs').rmSync('docs',{recursive:true,force:true})\" && parcel build index.html --dist-dir docs --public-url ./ --no-source-maps",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "typecheck": "tsc --noEmit -p ."
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "AutoHotkey v2 AST explorer built on Descolada's ANTLR4 grammar",
   "devDependencies": {
+    "@types/codemirror": "^5.60.18",
     "@types/viz.js": "^2.1.5",
     "antlr4ng": "^3.0.16",
     "buffer": "^6.0.3",
     "parcel": "^2.15.4",
-    "process": "^0.11.10"
+    "process": "^0.11.10",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
+    "codemirror": "^5.65.21",
     "viz.js": "^2.1.2"
   }
 }

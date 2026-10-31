@@ -1,525 +1,359 @@
-import * as Antlr4 from 'antlr4ng';
-import { AutoHotkeyLexer } from './parser/AutoHotkeyLexer';
-import { AutoHotkeyParser } from './parser/AutoHotkeyParser';
-import Viz from "viz.js";
-import { Module, render } from 'viz.js/full.render.js';
+import CodeMirror from 'codemirror';
+import 'codemirror/lib/codemirror.css';
+import { parseSource, Diagnostic, ParseResult, SrcPos, SrcRange, Severity } from './parse';
+import { buildModel, Model, nodeAtPos, ViewNode } from './model';
+import { lint, LINT_RULES } from './lint';
+import { GraphView } from './graph';
+import { OutlineView } from './outline';
+import { TokenView } from './tokens';
 
+type Tab = 'graph' | 'outline' | 'tokens';
 
-// Debounce timer ID
-let debounceTimer: number | undefined;
-const DEBOUNCE_DELAY = 500; // ms
-const inputEl = document.getElementById('input') as HTMLTextAreaElement;
-const graphEl = document.getElementById('graph')!;
-const collapseToTerminalNodes = document.getElementById('showAll') as HTMLInputElement | null;
+const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+const store = {
+    get(key: string): string | null { try { return localStorage.getItem('ahk-ast:' + key); } catch { return null; } },
+    set(key: string, value: string) { try { localStorage.setItem('ahk-ast:' + key, value); } catch { /* storage unavailable */ } },
+};
 
-class LexerErrorListener implements Antlr4.ANTLRErrorListener {
-  public errors: string[] = [];
-  syntaxError(_recognizer: any, _offendingSymbol: any,
-              line: number, charPositionInLine: number,
-              msg: string) {
-    this.errors.push(`Lexing error at line ${line}:${charPositionInLine} – ${msg}`);
-  }
-    reportAmbiguity(_recognizer: any, _dfa: any, _startIndex: number, _stopIndex: number, _exact: boolean, _ambigAlts: any, _configs: any) { }
-    reportAttemptingFullContext(_recognizer: any, _dfa: any, _startIndex: number, _stopIndex: number, _ambigAlts: any, _configs: any) { }
-    reportContextSensitivity(_recognizer: any, _dfa: any, _startIndex: number, _stopIndex: number, _prediction: number, _configs: any) { }
-}
-class SyntaxErrorListener implements Antlr4.ANTLRErrorListener {
-    public errors: string[] = [];
-    syntaxError(_recognizer: any, _offendingSymbol: any, line: number, charPositionInLine: number, msg: string) {
-        this.errors.push(`Parse error at line ${line}:${charPositionInLine} - ${msg}`);
-    }
-    reportAmbiguity(_recognizer: any, _dfa: any, _startIndex: number, _stopIndex: number, _exact: boolean, _ambigAlts: any, _configs: any) { }
-    reportAttemptingFullContext(_recognizer: any, _dfa: any, _startIndex: number, _stopIndex: number, _ambigAlts: any, _configs: any) { }
-    reportContextSensitivity(_recognizer: any, _dfa: any, _startIndex: number, _stopIndex: number, _prediction: number, _configs: any) { }
-}
+// ---------------------------------------------------------------------------
+// Editor
 
-// Main parse-and-render function
-function parseAndRender() {
-    const code = editor.getValue();
-
-    // Clear previous outputs
-    graphEl.innerHTML = '';
-    graphEl.textContent = '';
-
-    try {
-        // Lex
-        const input = Antlr4.CharStream.fromString(code + '\n');
-        let timerStart = performance.now();
-        const lexer = new AutoHotkeyLexer(input);
-        const lexErrors = new LexerErrorListener();
-        lexer.removeErrorListeners();
-        lexer.addErrorListener(lexErrors);
-
-        const codeTokens = readTokens(lexer);
-
-        let timerEnd = performance.now();
-        console.log(`Lexing took ${(timerEnd - timerStart).toFixed(2)} ms`);
-
-        timerStart = performance.now();
-        // Parse
-        var codeTokenSource = new Antlr4.ListTokenSource(codeTokens);
-        var codeTokenStream = new Antlr4.CommonTokenStream(codeTokenSource);
-        const parser = new AutoHotkeyParser(codeTokenStream);
-        const errorListener = new SyntaxErrorListener();
-        parser.removeErrorListeners();
-        parser.addErrorListener(errorListener);
-
-        const tree = parser.program();
-
-        timerEnd = performance.now();
-        console.log(`Parsing took ${(timerEnd - timerStart).toFixed(2)} ms`);
-
-        if (errorListener.errors.length) {
-            graphEl.textContent = errorListener.errors.join('\n');
-            /*
-            codeTokens.forEach((t) => {
-                const name = parser.vocabulary.getSymbolicName(t.type) ?? t.type;
-                console.log(`${name}: "${t.text}"`);
-            });
-            */
-            return;
-        }
-
-        // Build DOT
-        const lines: string[] = [];
-        lines.push('digraph G {');
-        lines.push('  graph [nodesep=0.2, ranksep=0.2, fontsize=10, fontname="monospace"];');
-        lines.push('  node [fontsize=8, fontname="monospace"];');
-
-        let id = 0;
-
-        const showAll = !collapseToTerminalNodes?.checked;
-
-        // helper: rule names to always skip through
-        const SKIP_RULES = new Set(['s', 'eos']);
-        // helper: is terminal?
-        const isTerminalNode = (n: Antlr4.ParseTree) => n.getChildCount() === 0;
-        // helper: should this terminal be hidden entirely?
-        const isHiddenTerminal = (type?: number) => {
-            if (type == null) return false;
-            const name = parser.vocabulary.getSymbolicName(type) || '';
-            return name === 'EOL' || name === 'WS' || name === 'EOF';
-        };
-
-        // helper: collapse chains like A->B->C when there’s only one child at each step
-        function collapse(node: Antlr4.ParseTree): Antlr4.ParseTree {
-            if (showAll) return node;
-
-            let n: Antlr4.ParseTree = node;
-
-            // First: skip through wrapper rules we don’t want to show at all
-            while (!isTerminalNode(n)) {
-                const ctx = n as Antlr4.ParserRuleContext;
-                const ruleName = parser.ruleNames[ctx.ruleIndex];
-                if (!SKIP_RULES.has(ruleName)) break;
-                if (n.getChildCount() !== 1) break;
-                n = n.getChild(0)!;
-            }
-
-            // Then: collapse linear chains (nonterminals with exactly one child)
-            while (!isTerminalNode(n) && n.getChildCount() === 1) {
-                const onlyChild = n.getChild(0)!;
-
-                // If the child is a hidden terminal (EOL/WS/EOF), stop collapsing here;
-                // we will drop that child later anyway.
-                if (isTerminalNode(onlyChild)) {
-                const term = onlyChild as Antlr4.TerminalNode;
-                if (isHiddenTerminal(term.symbol?.type)) break;
-                }
-                n = onlyChild;
-            }
-            return n;
-        }
-
-        function labelFor(node: Antlr4.ParseTree): string | null {
-            if (isTerminalNode(node)) {
-                const term = node as Antlr4.TerminalNode;
-                const type = term.symbol?.type;
-                if (isHiddenTerminal(type)) return null;
-                const tokenName = parser.vocabulary.getSymbolicName(type!) || '';
-                return `${tokenName}: "${term.getText()}"`;
-            } else {
-                const ctx = node as Antlr4.ParserRuleContext;
-                const ruleName = parser.ruleNames[ctx.ruleIndex];
-
-                // If we’re showing all nodes, we still skip the wrapper rules entirely (like before).
-                if (SKIP_RULES.has(ruleName) && showAll === false) return null;
-
-                return ruleName;
-            }
-        }
-
-        function addNode(node: Antlr4.ParseTree, parentId?: number) {
-            // collapse this node first (unless "Show all")
-            const n = collapse(node);
-
-            // produce label (may return null for hidden terminals / skipped rules)
-            const label = labelFor(n);
-            if (label == null) return;
-
-            const myId = id++;
-            const jsonLabel = JSON.stringify(label);
-            lines.push(`  n${myId} [label=${jsonLabel}];`);
-            if (parentId !== undefined) {
-                lines.push(`  n${parentId} -> n${myId};`);
-            }
-
-            // Recurse into (possibly collapsed) node’s children
-            const childCount = n.getChildCount();
-            for (let i = 0; i < childCount; i++) {
-                const child = n.getChild(i)!;
-
-                // Skip hidden terminals entirely
-                if (isTerminalNode(child)) {
-                const t = (child as Antlr4.TerminalNode).symbol?.type;
-                if (isHiddenTerminal(t)) continue;
-                }
-
-                addNode(child, myId);
-            }
-        }
-
-        addNode(tree);
-        lines.push('}');
-        const dot = lines.join('\n');
-
-        // Render with Viz.js
-        const viz = new Viz({ Module, render });
-        viz.renderSVGElement(dot)
-            .then((svg: SVGElement) => graphEl.appendChild(svg))
-            .catch((e: any) => {
-                graphEl.textContent = `Rendering the AST tree failed. This is usually because the tree was too large, but Viz.renderSVGElement returned the following error: ${e.toString()}`
-                return;
-            });
-
-    } catch (e: any) {
-        graphEl.textContent = e.message;
-    }
-}
-
-// @ts-ignore: CodeMirror is loaded via <script> in the page
-const editor = (window as any).CodeMirror.fromTextArea(inputEl, {
+const inputEl = $<HTMLTextAreaElement>('input');
+const saved = store.get('code');
+if (saved !== null) inputEl.value = saved;
+const editor = CodeMirror.fromTextArea(inputEl, {
     lineNumbers: true,
-    mode: "text/plain",
-    theme: "default",
+    mode: 'text/plain',
+    gutters: ['lint-gutter', 'CodeMirror-linenumbers'],
+    indentUnit: 4,
+    tabSize: 4,
 });
 
-// Set up debounced event listener on textarea
+function cpToUnits(text: string, cp: number): number {
+    let units = 0, n = 0;
+    for (const ch of text) { if (n++ >= cp) break; units += ch.length; }
+    return units;
+}
+function unitsToCp(text: string, units: number): number {
+    let u = 0, n = 0;
+    for (const ch of text) { if (u >= units) break; u += ch.length; n++; }
+    return n;
+}
+function toCM(p: SrcPos): CodeMirror.Position {
+    const last = editor.lastLine();
+    if (p.line > last) return { line: last, ch: editor.getLine(last).length };
+    return { line: p.line, ch: cpToUnits(editor.getLine(p.line) ?? '', p.col) };
+}
+function fromCM(p: CodeMirror.Position): SrcPos {
+    return { line: p.line, col: unitsToCp(editor.getLine(p.line) ?? '', p.ch) };
+}
+
+// ---------------------------------------------------------------------------
+// State
+
+let result: ParseResult | null = null;
+let model: Model = { root: null, nodes: [] };
+let diagnostics: Diagnostic[] = [];
+let selected: ViewNode | null = null;
+let activeTab: Tab = (store.get('tab') as Tab) || 'graph';
+let graphDirty = true;
+let lastEditAt = 0;
+const collapseBox = $<HTMLInputElement>('showAll');
+collapseBox.checked = store.get('collapse') === '1';
+
+const graph = new GraphView($('graph'), { onSelect: n => select(n, 'graph') });
+const outline = new OutlineView($('outline'), { onSelect: n => select(n, 'outline') });
+const tokens = new TokenView($('tokens'), { onSelect: r => highlightRange(r, true) });
+
+// ---------------------------------------------------------------------------
+// Parsing and rendering
+
+function update() {
+    const code = editor.getValue();
+    store.set('code', code);
+    result = parseSource(code);
+    diagnostics = [...result.diagnostics];
+    const banner = $('stale-banner');
+    if (result.tree && result.parser) {
+        diagnostics.push(...lint(result.tree));
+        model = buildModel(result.tree, result.parser, collapseBox.checked);
+        banner.hidden = true;
+        refreshViews();
+    } else {
+        // Lexing failed: keep the last good tree on screen.
+        banner.hidden = false;
+    }
+    tokens.setTokens(result.codeTokens, result.allTokens);
+    renderDiagnostics();
+    renderStatus();
+}
+
+function refreshViews() {
+    selected = null;
+    renderBreadcrumb();
+    highlightRange(null, false);
+    outline.mark('sel', []);
+    graph.mark('sel', []);
+    outline.render(model);
+    graphDirty = true;
+    if (activeTab === 'graph') renderGraph();
+    runSearch(false);
+    syncCursor(false);
+}
+
+function renderGraph() {
+    if (!graphDirty) return;
+    graphDirty = false;
+    graph.render(model);
+}
+
+function renderStatus() {
+    if (!result) return;
+    const errs = diagnostics.filter(d => d.severity === 'error').length;
+    $('status').textContent = `${model.nodes.length} nodes · ${result.codeTokens.length} tokens · `
+        + `lex ${result.lexMs.toFixed(1)} ms · parse ${result.parseMs.toFixed(1)} ms`
+        + (errs ? ` · ${errs} error${errs === 1 ? '' : 's'}` : '');
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+
+let lintMarks: CodeMirror.TextMarker[] = [];
+const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
+
+function renderDiagnostics() {
+    lintMarks.forEach(m => m.clear());
+    lintMarks = [];
+    editor.clearGutter('lint-gutter');
+    diagnostics.sort((a, b) => a.range.from.line - b.range.from.line || a.range.from.col - b.range.from.col
+        || SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+
+    const byLine = new Map<number, Diagnostic[]>();
+    for (const d of diagnostics) {
+        const from = toCM(d.range.from);
+        let to = toCM(d.range.to);
+        if (to.line === from.line && to.ch === from.ch) to = { line: to.line, ch: to.ch + 1 };
+        lintMarks.push(editor.markText(from, to, { className: `cm-lint cm-lint-${d.severity}`, attributes: { title: d.message } }));
+        const list = byLine.get(from.line) ?? [];
+        list.push(d);
+        byLine.set(from.line, list);
+    }
+    for (const [line, list] of byLine) {
+        const worst = list.reduce((a, b) => SEVERITY_ORDER[b.severity] < SEVERITY_ORDER[a.severity] ? b : a);
+        const marker = document.createElement('div');
+        marker.className = `lint-marker lint-${worst.severity}`;
+        marker.title = list.map(d => d.message).join('\n\n');
+        editor.setGutterMarker(line, 'lint-gutter', marker);
+    }
+
+    const panel = $('problems-list');
+    const counts = { error: 0, warning: 0, info: 0 };
+    for (const d of diagnostics) counts[d.severity]++;
+    const summary = (['error', 'warning', 'info'] as Severity[])
+        .filter(s => counts[s]).map(s => `${counts[s]} ${s}${counts[s] === 1 ? '' : 's'}`).join(', ');
+    $('problems-count').textContent = summary || 'none';
+    if (!diagnostics.length) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = 'No problems found.';
+        panel.replaceChildren(li);
+        return;
+    }
+    panel.replaceChildren(...diagnostics.map(d => {
+        const li = document.createElement('li');
+        li.className = `problem sev-${d.severity}`;
+        li.tabIndex = 0;
+        const icon = document.createElement('span');
+        icon.className = 'icon';
+        icon.setAttribute('aria-label', d.severity);
+        const msg = document.createElement('span');
+        msg.className = 'msg';
+        msg.textContent = d.message;
+        const meta = document.createElement('span');
+        meta.className = 'meta';
+        meta.textContent = `${d.rule} · ${d.range.from.line + 1}:${d.range.from.col + 1}`;
+        li.append(icon, msg, meta);
+        if (d.docs) {
+            const a = document.createElement('a');
+            a.href = d.docs;
+            a.target = '_blank';
+            a.rel = 'noopener';
+            a.textContent = 'docs';
+            a.onclick = e => e.stopPropagation();
+            meta.append(' · ', a);
+        }
+        const go = () => {
+            editor.focus();
+            editor.setSelection(toCM(d.range.from), toCM(d.range.to));
+            editor.scrollIntoView({ from: toCM(d.range.from), to: toCM(d.range.to) }, 80);
+        };
+        li.onclick = go;
+        li.onkeydown = e => { if (e.key === 'Enter') go(); };
+        return li;
+    }));
+}
+
+$('rules-list').replaceChildren(...LINT_RULES.map(r => {
+    const li = document.createElement('li');
+    const b = document.createElement('b');
+    b.textContent = r.id;
+    li.append(b, ` ${r.title}. ${r.description}`);
+    return li;
+}));
+
+// ---------------------------------------------------------------------------
+// Selection, cursor sync, breadcrumb
+
+let selMark: CodeMirror.TextMarker | null = null;
+
+function highlightRange(range: SrcRange | null, scroll: boolean) {
+    selMark?.clear();
+    selMark = null;
+    if (!range) return;
+    const from = toCM(range.from), to = toCM(range.to);
+    selMark = editor.markText(from, to, { className: 'cm-node-sel' });
+    if (scroll) editor.scrollIntoView({ from, to }, 60);
+}
+
+function select(node: ViewNode | null, source: 'graph' | 'outline' | 'search' | 'crumb') {
+    selected = node;
+    const list = node ? [node] : [];
+    graph.mark('sel', list);
+    outline.mark('sel', list);
+    highlightRange(node?.range ?? null, true);
+    renderBreadcrumb();
+    if (!node) return;
+    if (activeTab === 'graph' && source !== 'graph') graph.reveal(node);
+    if (activeTab === 'outline' && source !== 'outline') outline.reveal(node);
+}
+
+function renderBreadcrumb() {
+    const bar = $('breadcrumb');
+    if (!selected) {
+        bar.textContent = 'Click a node to highlight its code. Move the cursor in the editor to find its node.';
+        bar.classList.add('hint');
+        return;
+    }
+    bar.classList.remove('hint');
+    const chain: ViewNode[] = [];
+    for (let n: ViewNode | null = selected; n; n = n.parent) chain.unshift(n);
+    const parts: (string | HTMLElement)[] = [];
+    chain.forEach((n, i) => {
+        if (i) parts.push(' › ');
+        const b = document.createElement('button');
+        b.className = 'crumb' + (n === selected ? ' current' : '');
+        b.textContent = n.text !== undefined ? `${n.name} ${JSON.stringify(n.text)}` : n.name;
+        b.onclick = () => select(n, 'crumb');
+        parts.push(b);
+    });
+    if (selected.range) {
+        const r = selected.range;
+        const pos = document.createElement('span');
+        pos.className = 'crumb-pos';
+        pos.textContent = `  ${r.from.line + 1}:${r.from.col + 1}–${r.to.line + 1}:${r.to.col + 1}`;
+        parts.push(pos);
+    }
+    bar.replaceChildren(...parts);
+    bar.scrollLeft = bar.scrollWidth;
+}
+
+function syncCursor(reveal: boolean) {
+    const pos = fromCM(editor.getCursor());
+    const node = model.root ? nodeAtPos(model, pos) : null;
+    const list = node ? [node] : [];
+    graph.mark('cur', list);
+    outline.mark('cur', list);
+    tokens.markAt(pos.line, pos.col, reveal && activeTab === 'tokens');
+    if (!node || !reveal) return;
+    if (activeTab === 'graph') graph.reveal(node);
+    else if (activeTab === 'outline') outline.reveal(node);
+}
+
+// ---------------------------------------------------------------------------
+// Search
+
+let matches: ViewNode[] = [];
+let matchIndex = -1;
+const searchBox = $<HTMLInputElement>('search');
+
+function runSearch(jump: boolean) {
+    const q = searchBox.value.trim().toLowerCase();
+    matches = q ? model.nodes.filter(n => n.label.toLowerCase().includes(q)) : [];
+    matchIndex = -1;
+    graph.mark('match', matches);
+    outline.mark('match', matches);
+    $('search-count').textContent = q ? (matches.length ? `${matches.length} found` : 'no match') : '';
+    if (jump && matches.length) step(1);
+}
+
+function step(dir: number) {
+    if (!matches.length) return;
+    matchIndex = (matchIndex + dir + matches.length) % matches.length;
+    $('search-count').textContent = `${matchIndex + 1} of ${matches.length}`;
+    select(matches[matchIndex], 'search');
+}
+
+let searchTimer: number | undefined;
+searchBox.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => runSearch(false), 150);
+});
+searchBox.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); if (matchIndex < 0 && !matches.length) runSearch(true); else step(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Escape') { searchBox.value = ''; runSearch(false); }
+});
+$('search-prev').onclick = () => step(-1);
+$('search-next').onclick = () => step(1);
+
+// ---------------------------------------------------------------------------
+// Tabs and toolbar
+
+function setTab(tab: Tab) {
+    activeTab = tab;
+    store.set('tab', tab);
+    for (const t of ['graph', 'outline', 'tokens'] as Tab[]) {
+        $(`tab-${t}`).setAttribute('aria-selected', String(t === tab));
+        $(t).hidden = t !== tab;
+    }
+    document.body.dataset.tab = tab;
+    if (tab === 'graph') renderGraph();
+    if (selected) { if (tab === 'graph') graph.reveal(selected); if (tab === 'outline') outline.reveal(selected); }
+    syncCursor(false);
+}
+for (const t of ['graph', 'outline', 'tokens'] as Tab[]) $(`tab-${t}`).onclick = () => setTab(t);
+
+$('zoom-in').onclick = () => graph.zoomBy(1.25);
+$('zoom-out').onclick = () => graph.zoomBy(0.8);
+$('zoom-fit').onclick = () => graph.fit();
+$('zoom-100').onclick = () => graph.actualSize();
+$('expand-all').onclick = () => outline.setAll(true);
+$('collapse-all').onclick = () => outline.setAll(false);
+const allTokensBox = $<HTMLInputElement>('all-tokens');
+allTokensBox.onchange = () => { tokens.showAll = allTokensBox.checked; tokens.render(); syncCursor(false); };
+
+collapseBox.addEventListener('change', () => {
+    store.set('collapse', collapseBox.checked ? '1' : '0');
+    if (result?.tree && result.parser) {
+        model = buildModel(result.tree, result.parser, collapseBox.checked);
+        refreshViews();
+        renderStatus();
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Wiring
+
+let debounceTimer: number | undefined;
 editor.on('change', () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = window.setTimeout(() => parseAndRender(), DEBOUNCE_DELAY);
+    lastEditAt = performance.now();
+    clearTimeout(debounceTimer);
+    debounceTimer = window.setTimeout(update, 350);
+});
+let cursorTimer: number | undefined;
+editor.on('cursorActivity', () => {
+    clearTimeout(cursorTimer);
+    cursorTimer = window.setTimeout(() => syncCursor(performance.now() - lastEditAt > 400), 60);
 });
 
-collapseToTerminalNodes?.addEventListener('change', () => parseAndRender());
-
-// Initial render on page load
-parseAndRender();
-
-function readTokens(lexer: AutoHotkeyLexer): Antlr4.Token[] {
-    const tokenStream = new Antlr4.CommonTokenStream(lexer);
-    tokenStream.fill();
-    const tokens = tokenStream.getTokens();
-
-    const codeTokens: Antlr4.Token[] = [];
-    let index = 0;
-
-    // skip any leading WS
-    while (index < tokens.length && tokens[index].type === AutoHotkeyLexer.WS) {
-        index++;
-    }
-
-    const ERROR_CHANNEL = AutoHotkeyLexer.channelNames.indexOf("ERROR");
-
-    // by default we include everything except hidden‐channel tokens
-    while (index < tokens.length) {
-        let tk = tokens[index];
-        
-        let shouldAdd = true;
-        let skipAdvance = false;
-
-        // skip purely hidden tokens (comments, directive‑mode hidden WS, etc.)
-        if (tk.channel === Antlr4.Lexer.HIDDEN) {
-            index++;
-            continue;
-        } else if (tk.channel === ERROR_CHANNEL) {
-            // Show in the graph area and skip parsing
-            if (tk.text === "\"" || tk.text === "'")
-                throw new Error(`Error: Unterminated string literal at ${tk.line}:${tk.column}`);
-            throw new Error(`Lexing error at ${tk.line}:${tk.column} - unexpected '${tk.text}'`);
-        }
-
-        switch (tk.type) {
-            case AutoHotkeyLexer.Hashtag:
-                if (index+1 < tokens.length && tokens[index+1].channel == AutoHotkeyLexer.HIDDEN)
-                    throw new Error(`Error: Unexpected whitespace after hashtag at ${tk.line}:${tk.column}`);
-            case AutoHotkeyLexer.OpenBrace:
-                PopWhitespaces(codeTokens, /*allowLinebreaks*/ false);
-                break;
-
-            case AutoHotkeyLexer.OpenParen:
-                index = SkipWhitespaces(tokens, codeTokens, index);
-                break;
-
-            case AutoHotkeyLexer.Comma:
-                index = SkipWhitespaces(tokens, codeTokens, index);
-                PopEOLs(codeTokens);
-                break;
-
-            case AutoHotkeyLexer.CloseParen:
-                PopWhitespaces(codeTokens, /*allowLinebreaks*/ true);
-                break;
-            // arithmetic / bitwise operators
-            case AutoHotkeyLexer.Multiply:
-                PopWhitespaces(codeTokens, /*allowLinebreaks*/ true);
-                break;
-
-            case AutoHotkeyLexer.EOL: {
-                PopWhitespaces(codeTokens, /*allowLinebreaks*/ true);
-                index = SkipWhitespaces(tokens, codeTokens, index);
-                break;
-            }
-
-            case AutoHotkeyLexer.Not:
-            case AutoHotkeyLexer.BitNot:
-			case AutoHotkeyLexer.Plus: // Can't pop whitespaces because of function call statement
-			case AutoHotkeyLexer.Minus:
-				index = SkipWhitespaces(tokens, codeTokens, index);
-                break;
-
-            case AutoHotkeyLexer.Dot:
-            case AutoHotkeyLexer.Assign:
-            case AutoHotkeyLexer.Divide:
-            case AutoHotkeyLexer.IntegerDivide:
-            case AutoHotkeyLexer.Power:
-            case AutoHotkeyLexer.NullCoalesce:
-            case AutoHotkeyLexer.RightShiftArithmetic:
-            case AutoHotkeyLexer.LeftShiftArithmetic:
-            case AutoHotkeyLexer.RightShiftLogical:
-            case AutoHotkeyLexer.LessThan:
-            case AutoHotkeyLexer.MoreThan:
-            case AutoHotkeyLexer.LessThanEquals:
-            case AutoHotkeyLexer.GreaterThanEquals:
-            case AutoHotkeyLexer.Equals_:
-            case AutoHotkeyLexer.NotEquals:
-            case AutoHotkeyLexer.IdentityEquals:
-            case AutoHotkeyLexer.IdentityNotEquals:
-            case AutoHotkeyLexer.RegExMatch:
-            case AutoHotkeyLexer.BitXOr:
-            case AutoHotkeyLexer.BitOr:
-            case AutoHotkeyLexer.And:
-            case AutoHotkeyLexer.Or:
-            case AutoHotkeyLexer.VerbalAnd:
-            case AutoHotkeyLexer.VerbalOr:
-            case AutoHotkeyLexer.MultiplyAssign:
-            case AutoHotkeyLexer.DivideAssign:
-            case AutoHotkeyLexer.ModulusAssign:
-            case AutoHotkeyLexer.PlusAssign:
-            case AutoHotkeyLexer.MinusAssign:
-            case AutoHotkeyLexer.LeftShiftArithmeticAssign:
-            case AutoHotkeyLexer.RightShiftArithmeticAssign:
-            case AutoHotkeyLexer.RightShiftLogicalAssign:
-            case AutoHotkeyLexer.IntegerDivideAssign:
-            case AutoHotkeyLexer.ConcatenateAssign:
-            case AutoHotkeyLexer.BitAndAssign:
-            case AutoHotkeyLexer.BitXorAssign:
-            case AutoHotkeyLexer.BitOrAssign:
-            case AutoHotkeyLexer.PowerAssign:
-            case AutoHotkeyLexer.NullishCoalescingAssign:
-            case AutoHotkeyLexer.QuestionMarkDot:
-            case AutoHotkeyLexer.Arrow:
-                PopWhitespaces(codeTokens, /*allowLinebreaks*/ true);
-                index = SkipWhitespaces(tokens, codeTokens, index);
-                break;
-
-            case AutoHotkeyLexer.Loop: {
-                // if next is WS + a keyword, consume them
-                var condition = false;
-                if (tokens[index + 1]?.type === AutoHotkeyLexer.WS) {
-                    const t2 = tokens[index + 2]?.type;
-                    if (
-                        t2 === AutoHotkeyLexer.Files ||
-                        t2 === AutoHotkeyLexer.Parse ||
-                        t2 === AutoHotkeyLexer.Read ||
-                        t2 === AutoHotkeyLexer.Reg
-                    ) {
-                        index += 2;
-                        codeTokens.push(tk); // Add "Loop"
-                        tokens[index - 1].channel = AutoHotkeyLexer.HIDDEN; // Hide whitespaces
-                        codeTokens.push(tokens[index - 1]); // Add whitespaces
-                        tk = tokens[index];
-                        condition = tk.type === AutoHotkeyLexer.Not || tk.type === AutoHotkeyLexer.VerbalNot;
-                    }
-                }
-                codeTokens.push(tk);
-                if (tokens[index + 1].type == AutoHotkeyLexer.Comma) {
-                    index++;
-                    tokens[index].channel = AutoHotkeyLexer.HIDDEN; // Hide comma
-                    codeTokens.push(tokens[index]);
-                }
-                AddWhitespaces(tokens, codeTokens, index, condition);
-                shouldAdd = false;
-                // fallthrough to adding the Loop token
-                break;
-            }
-
-            // a bunch of statement‐like keywords get extra whitespace inserted
-            case AutoHotkeyLexer.Try:
-            case AutoHotkeyLexer.If:
-            case AutoHotkeyLexer.Catch:
-            case AutoHotkeyLexer.Finally:
-            case AutoHotkeyLexer.As:
-            case AutoHotkeyLexer.For:
-            case AutoHotkeyLexer.Switch:
-            case AutoHotkeyLexer.Case:
-            case AutoHotkeyLexer.Default:
-            case AutoHotkeyLexer.While:
-            case AutoHotkeyLexer.Until:
-            case AutoHotkeyLexer.Else:
-            case AutoHotkeyLexer.Goto:
-            case AutoHotkeyLexer.Throw:
-            case AutoHotkeyLexer.Static:
-            case AutoHotkeyLexer.Not:
-            case AutoHotkeyLexer.VerbalNot:
-                codeTokens.push(tk);
-                index = AddWhitespaces(tokens, codeTokens, index, /*linebreaksOnNot*/ tk.type === AutoHotkeyLexer.Not || tk.type === AutoHotkeyLexer.VerbalNot);
-                shouldAdd = false;
-                break;
-
-            case AutoHotkeyLexer.CloseBrace:
-                {
-                    let i = PopWhitespaces(codeTokens, /*allowLinebreaks=*/ true);
-                    // ensure a trailing EOL after a close‑brace
-                    const eolToken = Antlr4.CommonToken.fromType(AutoHotkeyLexer.EOL, '\n');
-                    if (codeTokens[i]?.type !== AutoHotkeyLexer.EOL) {
-                        codeTokens.push(eolToken);
-                    }
-                    codeTokens.push(tk);
-                    i = index;
-                    let eolPresent = false;
-                    while (++i < tokens.length) {
-                        if ((tokens[i].channel == AutoHotkeyLexer.HIDDEN)
-                            || (tokens[i].type == AutoHotkeyLexer.WS))
-                            index++;
-                        else if (tokens[i].type == AutoHotkeyLexer.EOL) {
-                            eolPresent = true;
-                            break;
-                        }
-                        else
-                            break;
-                    }
-                    if (!eolPresent) {
-                        codeTokens.push(eolToken);
-                    }
-                    shouldAdd = false;
-                }
-                break;
-
-            case AutoHotkeyLexer.HotIf:
-            case AutoHotkeyLexer.InputLevel:
-            case AutoHotkeyLexer.UseHook:
-            case AutoHotkeyLexer.SuspendExempt:
-                index = SkipWhitespaces(tokens, codeTokens, index, false);
-                break;
-
-            default:
-                break;
-        }
-
-        if (shouldAdd)
-            codeTokens.push(tk);
-        if (!skipAdvance)
-            index++;
-    }
-
-    // strip any remaining WS / EOL at the very front
-    while (
-        codeTokens.length &&
-        (codeTokens[0].type === AutoHotkeyLexer.WS ||
-            codeTokens[0].type === AutoHotkeyLexer.EOL)
-    ) {
-        codeTokens.shift();
-    }
-
-    return codeTokens;
-}
-
-// Helpers (direct port of your C# PopWhitespaces / SkipWhitespaces logic)
-
-function PopWhitespaces(
-    codeTokens: Antlr4.Token[],
-    allowLinebreaks = true
-): number {
-    let i = codeTokens.length - 1;
-    while (i >= 0) {
-        const ct = codeTokens[i];
-        if (
-            ct.type === AutoHotkeyLexer.WS ||
-            (allowLinebreaks && ct.type === AutoHotkeyLexer.EOL)
-        ) {
-            codeTokens.pop();
-            i--;
-        } else {
-            break;
-        }
-    }
-    return i;
-}
-
-function SkipWhitespaces(
-    allTokens: Antlr4.Token[],
-    codeTokens: Antlr4.Token[],
-    startIndex: number,
-    linebreaks: boolean = true
-): number {
-    let idx = startIndex;
-    while (++idx < allTokens.length) {
-        const t = allTokens[idx];
-        if ((t.channel === AutoHotkeyLexer.HIDDEN) 
-            || (t.type === AutoHotkeyLexer.WS) 
-            || (linebreaks && t.type == AutoHotkeyLexer.EOL)) {
-            startIndex++;
-        } else {
-            break;
-        }
-    }
-    return startIndex;
-}
-
-function PopEOLs(codeTokens: Antlr4.Token[]) {
-    // remove any EOL tokens at the end of codeTokens
-    while (
-        codeTokens.length &&
-        codeTokens[codeTokens.length - 1].type === AutoHotkeyLexer.EOL
-    ) {
-        codeTokens.pop();
-    }
-}
-
-function AddWhitespaces(
-    allTokens: Antlr4.Token[],
-    codeTokens: Antlr4.Token[],
-    startIndex: number,
-    condition: boolean
-): number {
-    let i = startIndex;
-    while (++i < allTokens.length) {
-        const t = allTokens[i];
-
-        if (t.channel === AutoHotkeyLexer.HIDDEN)
-            startIndex++;
-        // If it's an EOL and condition is true, skip it
-        else if (t.type === AutoHotkeyLexer.EOL && condition) {
-            startIndex++;
-        }
-        // If it’s a plain whitespace token, keep it
-        else if (t.type === AutoHotkeyLexer.WS) {
-            codeTokens.push(t);
-            startIndex++;
-        }
-        // Otherwise stop
-        else {
-            break;
-        }
-    }
-    return startIndex;
-}
+setTab(activeTab);
+update();

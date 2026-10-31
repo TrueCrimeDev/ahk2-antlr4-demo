@@ -1,2 +1,44 @@
-# ahk2-antlr4-demo
-AutoHotkey v2 ANTLR4 Grammar Demo
+# AutoHotkey v2 AST Explorer
+
+A fork of [Descolada/ahk2-antlr4-demo](https://github.com/Descolada/ahk2-antlr4-demo) that adds tools for reading and checking the parse tree from Descolada's AutoHotkey v2 ANTLR4 grammar.
+
+**Live:** https://truecrimedev.github.io/ahk2-antlr4-demo/
+
+## What this fork adds
+
+- **Click-to-source linking.** Click a node in the graph or outline to highlight its code. Move the editor cursor to mark the deepest node under it. A breadcrumb shows the selected node's path; click any part to select that ancestor.
+- **Problems panel.** Lexer and parser errors appear with positions instead of replacing the tree, plus two lint rules, all marked in the editor gutter and underlined.
+- **Graph view** with drag to pan, wheel or pinch to zoom, and Fit / 1:1 buttons. Rules are ovals, tokens are boxes.
+- **Outline view.** A collapsible text tree with line:column positions. It handles programs too large for Graphviz.
+- **Tokens view.** The exact token stream the parser reads after whitespace preprocessing, or every lexer token including hidden-channel comments and whitespace.
+- **Node search** across the graph and outline, with Enter / Shift+Enter to step through matches.
+- Light and dark themes, a phone layout, and your code saved in the browser between visits.
+
+## Lint rules
+
+| Rule | Checks |
+|:--|:--|
+| `arg-alias` | A plain variable passed as an argument is not read until the call runs, so another argument that assigns, increments or `&`-references it changes what the function receives. `x := 1, Pair(x, x := 2)` passes `[2, 2]`. See the known limitation under [Parameters](https://www.autohotkey.com/docs/alpha/Functions.htm#param). |
+| `callback-arity` | `Hotkey`, `HotIf`, `SetTimer`, `OnMessage`, `OnClipboardChange`, `OnError`, `OnExit`, Gui `OnEvent` / `OnNotify` / `OnCommand` and `Menu.Add` check a callback's parameters when it is registered and throw "Invalid callback function" if it can't accept what they pass. Checked for inline fat-arrow functions and for functions declared in the script. Parameter counts come from AutoHotkey's `ValidateFunctor` call sites. |
+
+## Development
+
+```sh
+npm install
+npm start          # dev server
+npm run typecheck
+npm run build      # writes the GitHub Pages site to docs/
+```
+
+Source layout:
+
+| File | Purpose |
+|:--|:--|
+| `src/lexing.ts` | Token preprocessing from the original demo |
+| `src/parse.ts` | Lexing and parsing with positioned diagnostics |
+| `src/model.ts` | Display tree, source ranges, collapse logic |
+| `src/lint.ts` | Lint rules |
+| `src/graph.ts`, `src/outline.ts`, `src/tokens.ts` | Views |
+| `src/index.ts` | Editor and UI wiring |
+
+The grammar in `src/grammar` and the generated parser in `src/parser` are unchanged from upstream.
