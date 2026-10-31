@@ -6,6 +6,7 @@ A fork of [Descolada/ahk2-antlr4-demo](https://github.com/Descolada/ahk2-antlr4-
 
 ## What this fork adds
 
+- **Examples picker.** A dropdown above the editor with Weird AHK parser edge cases, lint demos and a syntax tour, plus ‹ › buttons to step through them. Each one has a note on how AutoHotkey reads it and where this grammar disagrees. "Your code" keeps your own script, edits to an example are kept (with Reset to restore it), and `#ex=<id>` links open an example, e.g. [`#ex=insane-pipes`](https://truecrimedev.github.io/ahk2-antlr4-demo/#ex=insane-pipes).
 - **Click-to-source linking.** Click a node in the graph or outline to highlight its code. Move the editor cursor to mark the deepest node under it. A breadcrumb shows the selected node's path; click any part to select that ancestor.
 - **Problems panel.** Lexer and parser errors appear with positions instead of replacing the tree, plus two lint rules, all marked in the editor gutter and underlined.
 - **Graph view** with drag to pan, wheel or pinch to zoom, and Fit / 1:1 buttons. Rules are ovals, tokens are boxes.
@@ -14,7 +15,7 @@ A fork of [Descolada/ahk2-antlr4-demo](https://github.com/Descolada/ahk2-antlr4-
 - **Node search** across the graph and outline, with Enter / Shift+Enter to step through matches.
 - **Syntax highlighting** with the highlight.js 11.9 grammar and VS Code Dark+ colors from [AHKv2_LLMs](https://truecrimedev.github.io/AHKv2_LLMs/). `src/vendor/highlight-ahk2.js` starts from that repo's copy, with fixes found by checking it against the ANTLR lexer on about 1,300 scripts: keywords in any case, strings that can't run past their line, continuation sections, hotkeys and hotstrings. The header of the file lists the changes.
 - **Lint hints in the gutter.** Click or tap a colored dot next to a line number to see that line's problems, with docs links; click a problem to select its code.
-- Light and dark page themes, a phone layout, and your code saved in the browser between visits.
+- Light and dark page themes, a phone layout, and your code and edited examples saved in the browser between visits.
 
 ## Lint rules
 
@@ -42,6 +43,7 @@ Source layout:
 | `src/parse.ts` | Lexing and parsing with positioned diagnostics |
 | `src/model.ts` | Display tree, source ranges, collapse logic |
 | `src/lint.ts` | Lint rules |
+| `src/examples.ts` | Example scripts for the picker |
 | `src/graph.ts`, `src/outline.ts`, `src/tokens.ts` | Views |
 | `src/highlight.ts` | Applies highlight.js output to the editor |
 | `src/index.ts` | Editor and UI wiring |

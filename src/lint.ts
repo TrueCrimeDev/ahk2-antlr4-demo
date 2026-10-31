@@ -120,8 +120,10 @@ function checkArgAlias(args: ArgumentsContext, out: Diagnostic[]) {
         if (victim.arg.Multiply()) continue; // Spread argument.
         const name = deferredVar(victim.arg.singleExpression());
         if (!name) continue;
+        // Arguments run left to right, so only a change made by a later argument
+        // differs from reading the variable where it appears.
         for (const other of slots) {
-            if (other === victim) continue;
+            if (other.index <= victim.index) continue;
             const writes = writesTo(other.arg, name);
             if (!writes.length) continue;
             const w = writes.find(w => w.kind !== 'ref') ?? writes[0];

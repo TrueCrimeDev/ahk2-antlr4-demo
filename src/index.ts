@@ -7,6 +7,7 @@ import { GraphView } from './graph';
 import { OutlineView } from './outline';
 import { TokenView } from './tokens';
 import { Highlighter } from './highlight';
+import { EXAMPLES, Example, exampleById } from './examples';
 
 type Tab = 'graph' | 'outline' | 'tokens';
 
@@ -14,14 +15,13 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const store = {
     get(key: string): string | null { try { return localStorage.getItem('ahk-ast:' + key); } catch { return null; } },
     set(key: string, value: string) { try { localStorage.setItem('ahk-ast:' + key, value); } catch { /* storage unavailable */ } },
+    remove(key: string) { try { localStorage.removeItem('ahk-ast:' + key); } catch { /* storage unavailable */ } },
 };
 
 // ---------------------------------------------------------------------------
 // Editor
 
 const inputEl = $<HTMLTextAreaElement>('input');
-const saved = store.get('code');
-if (saved !== null) inputEl.value = saved;
 const editor = CodeMirror.fromTextArea(inputEl, {
     lineNumbers: true,
     mode: 'text/plain',
@@ -72,9 +72,11 @@ const tokens = new TokenView($('tokens'), { onSelect: r => highlightRange(r, tru
 // ---------------------------------------------------------------------------
 // Parsing and rendering
 
-function update() {
+/** Parse the editor text and refresh everything. `fresh` means new code was loaded, so a
+ *  lexing error clears the tree instead of keeping the previous one on screen. */
+function update(fresh = false) {
+    flushSave();
     const code = editor.getValue();
-    store.set('code', code);
     result = parseSource(code);
     diagnostics = [...result.diagnostics];
     const banner = $('stale-banner');
@@ -84,7 +86,11 @@ function update() {
         banner.hidden = true;
         refreshViews();
     } else {
-        // Lexing failed: keep the last good tree on screen.
+        // Lexing failed: keep the last good tree on screen while editing.
+        if (fresh) { model = { root: null, nodes: [] }; refreshViews(); }
+        banner.textContent = model.root
+            ? 'The code has a lexing error, so this is the last tree that parsed. See Problems.'
+            : 'The code has a lexing error, so there is no tree to show. See Problems.';
         banner.hidden = false;
     }
     tokens.setTokens(result.codeTokens, result.allTokens);
@@ -432,10 +438,142 @@ collapseBox.addEventListener('change', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Examples picker. "Your code" and each edited example keep their own text in
+// localStorage, so switching never loses anything. #ex=<id> links open an example.
+
+const MINE = 'mine';
+const DEFAULT_EXAMPLE = 'arg-alias';
+const MINE_STARTER = '; Your code. Type or paste AutoHotkey v2 code here.\n';
+const exSelect = $<HTMLSelectElement>('examples');
+const exNote = $('ex-note');
+const exReset = $('ex-reset');
+const exOptions = new Map<string, HTMLOptionElement>();
+let current = MINE;
+let loading = false;
+let unsaved = false;
+
+// Earlier versions kept a single 'code' slot. Keep it as "Your code" unless it is just the default.
+const legacy = store.get('code');
+if (legacy !== null) {
+    if (store.get(MINE) === null && legacy.trim() !== exampleById(DEFAULT_EXAMPLE)!.code.trim()) {
+        store.set(MINE, legacy);
+        if (store.get('current') === null) store.set('current', MINE);
+    }
+    store.remove('code');
+}
+
+const editedKey = (ex: Example) => 'ex:' + ex.id;
+const isEdited = (ex: Example) => store.get(editedKey(ex)) !== null;
+
+function textFor(id: string): string {
+    const ex = exampleById(id);
+    if (!ex) return store.get(MINE) ?? MINE_STARTER;
+    return store.get(editedKey(ex)) ?? ex.code;
+}
+
+function buildPicker() {
+    const mine = new Option('Your code', MINE);
+    exOptions.set(MINE, mine);
+    const groups = new Map<string, HTMLOptGroupElement>();
+    for (const ex of EXAMPLES) {
+        let group = groups.get(ex.group);
+        if (!group) {
+            group = document.createElement('optgroup');
+            group.label = ex.group;
+            groups.set(ex.group, group);
+        }
+        const opt = new Option(ex.title, ex.id);
+        exOptions.set(ex.id, opt);
+        group.append(opt);
+        renderOptionLabel(ex);
+    }
+    exSelect.replaceChildren(mine, ...groups.values());
+}
+
+function renderOptionLabel(ex: Example) {
+    exOptions.get(ex.id)!.textContent = ex.title + (isEdited(ex) ? ' (edited)' : '');
+}
+
+function renderExampleInfo() {
+    const ex = exampleById(current);
+    exNote.textContent = ex ? ex.note : 'Your own code, saved in this browser. Switching to an example keeps it.';
+    exReset.hidden = !(ex && isEdited(ex));
+}
+
+/** Store the editor text in the current slot. An example edited back to its original is no longer "edited". */
+function flushSave() {
+    if (!unsaved) return;
+    unsaved = false;
+    const code = editor.getValue();
+    const ex = exampleById(current);
+    if (!ex) { store.set(MINE, code); return; }
+    const was = isEdited(ex);
+    if (code === ex.code) store.remove(editedKey(ex)); else store.set(editedKey(ex), code);
+    if (isEdited(ex) !== was) { renderOptionLabel(ex); renderExampleInfo(); }
+}
+
+function setHash(id: string) {
+    const want = id === MINE ? '' : `#ex=${id}`;
+    if (location.hash === want) return;
+    try { history.replaceState(null, '', want || location.pathname + location.search); } catch { location.hash = want; }
+}
+
+function hashExample(): string | null {
+    const m = /^#ex=([\w-]+)$/.exec(location.hash);
+    return m && exampleById(m[1]) ? m[1] : null;
+}
+
+function showExample(id: string, opts: { updateHash?: boolean; keepHistory?: boolean } = {}) {
+    flushSave();
+    if (id !== MINE && !exampleById(id)) id = MINE;
+    current = id;
+    store.set('current', id);
+    exSelect.value = id;
+    renderExampleInfo();
+    if (opts.updateHash) setHash(id);
+    hideHint();
+    clearTimeout(debounceTimer);
+    loading = true;
+    try { editor.setValue(textFor(id)); } finally { loading = false; }
+    if (!opts.keepHistory) editor.clearHistory();
+    editor.setCursor({ line: 0, ch: 0 });
+    editor.scrollTo(0, 0);
+    update(true);
+}
+
+function stepExample(dir: number) {
+    const n = EXAMPLES.length;
+    const i = EXAMPLES.findIndex(e => e.id === current);
+    const next = i < 0 ? (dir > 0 ? 0 : n - 1) : (i + dir + n) % n;
+    showExample(EXAMPLES[next].id, { updateHash: true });
+}
+
+buildPicker();
+exSelect.onchange = () => showExample(exSelect.value, { updateHash: true });
+$('ex-prev').onclick = () => stepExample(-1);
+$('ex-next').onclick = () => stepExample(1);
+exReset.onclick = () => {
+    const ex = exampleById(current);
+    if (!ex) return;
+    store.remove(editedKey(ex));
+    unsaved = false;
+    renderOptionLabel(ex);
+    showExample(ex.id, { keepHistory: true });
+};
+window.addEventListener('hashchange', () => {
+    const id = hashExample();
+    if (id && id !== current) showExample(id);
+});
+window.addEventListener('pagehide', flushSave);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
+
+// ---------------------------------------------------------------------------
 // Wiring
 
 let debounceTimer: number | undefined;
 editor.on('change', () => {
+    if (loading) return;
+    unsaved = true;
     lastEditAt = performance.now();
     clearTimeout(debounceTimer);
     debounceTimer = window.setTimeout(update, 350);
@@ -447,4 +585,6 @@ editor.on('cursorActivity', () => {
 });
 
 setTab(activeTab);
-update();
+const storedCurrent = store.get('current');
+showExample(hashExample()
+    ?? (storedCurrent === MINE || (storedCurrent && exampleById(storedCurrent)) ? storedCurrent! : DEFAULT_EXAMPLE));

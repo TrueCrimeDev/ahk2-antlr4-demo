@@ -24,6 +24,14 @@
 
     <main class="container">
         <section class="left">
+            <div class="examples-bar">
+                <label for="examples">Example</label>
+                <button id="ex-prev" class="step" title="Previous example" aria-label="Previous example">‹</button>
+                <select id="examples"></select>
+                <button id="ex-next" class="step" title="Next example" aria-label="Next example">›</button>
+                <button id="ex-reset" title="Restore the original example. Ctrl+Z brings your edits back." hidden>Reset</button>
+            </div>
+            <p id="ex-note" class="ex-note"></p>
             <div class="editor-area">
                 <textarea id="input" rows="10" cols="60">; Type AutoHotkey v2 code here to see its AST.
 ; Click a tree node to highlight its code, or move the cursor to find its node.
