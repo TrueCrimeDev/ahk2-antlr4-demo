@@ -6,6 +6,7 @@ import { lint, LINT_RULES } from './lint';
 import { GraphView } from './graph';
 import { OutlineView } from './outline';
 import { TokenView } from './tokens';
+import { Highlighter } from './highlight';
 
 type Tab = 'graph' | 'outline' | 'tokens';
 
@@ -24,10 +25,13 @@ if (saved !== null) inputEl.value = saved;
 const editor = CodeMirror.fromTextArea(inputEl, {
     lineNumbers: true,
     mode: 'text/plain',
+    theme: 'ahk-dark',
     gutters: ['lint-gutter', 'CodeMirror-linenumbers'],
     indentUnit: 4,
     tabSize: 4,
 });
+
+new Highlighter(editor);
 
 function cpToUnits(text: string, cp: number): number {
     let units = 0, n = 0;

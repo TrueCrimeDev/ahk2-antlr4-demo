@@ -12,7 +12,8 @@ A fork of [Descolada/ahk2-antlr4-demo](https://github.com/Descolada/ahk2-antlr4-
 - **Outline view.** A collapsible text tree with line:column positions. It handles programs too large for Graphviz.
 - **Tokens view.** The exact token stream the parser reads after whitespace preprocessing, or every lexer token including hidden-channel comments and whitespace.
 - **Node search** across the graph and outline, with Enter / Shift+Enter to step through matches.
-- Light and dark themes, a phone layout, and your code saved in the browser between visits.
+- **Syntax highlighting** with the same highlight.js 11.9 grammar and VS Code Dark+ colors as [AHKv2_LLMs](https://truecrimedev.github.io/AHKv2_LLMs/). `src/vendor/highlight-ahk2.js` is copied unchanged from that repo, so updates can be dropped in.
+- Light and dark page themes, a phone layout, and your code saved in the browser between visits.
 
 ## Lint rules
 
@@ -39,6 +40,7 @@ Source layout:
 | `src/model.ts` | Display tree, source ranges, collapse logic |
 | `src/lint.ts` | Lint rules |
 | `src/graph.ts`, `src/outline.ts`, `src/tokens.ts` | Views |
+| `src/highlight.ts` | Applies highlight.js output to the editor |
 | `src/index.ts` | Editor and UI wiring |
 
 The grammar in `src/grammar` and the generated parser in `src/parser` are unchanged from upstream.

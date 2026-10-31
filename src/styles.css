@@ -15,7 +15,7 @@
     --info: #2f6fde;
     --rule-fill: #ffffff;
     --token-fill: #eef1f6;
-    --mono: ui-monospace, "Cascadia Code", Consolas, "DejaVu Sans Mono", monospace;
+    --mono: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, "DejaVu Sans Mono", monospace;
     color-scheme: light;
 }
 
@@ -108,31 +108,50 @@ button:hover { border-color: var(--accent); }
     overflow: hidden;
 }
 
+/* Editor: VS Code Dark+ look and highlight.js colors from the AHKv2_LLMs site (style.css). */
+.editor-area { border-color: #2b2b2b; }
 .CodeMirror {
     flex: 1;
     min-width: 0;
     height: 100% !important;
     font-family: var(--mono);
-    font-size: 13px;
-    background: var(--panel);
-    color: var(--fg);
+    font-size: 13.5px;
+    line-height: 1.6;
 }
-.CodeMirror-gutters { background: var(--bg); border-right: 1px solid var(--line); }
-.CodeMirror-linenumber { color: var(--muted); }
-.CodeMirror-cursor { border-left-color: var(--fg); }
-.CodeMirror-selected, .CodeMirror-focused .CodeMirror-selected { background: var(--accent-soft) !important; }
+.cm-s-ahk-dark.CodeMirror { background: #141414; color: #9cdcfe; }
+.cm-s-ahk-dark .CodeMirror-gutters { background: #141414; border-right: 1px solid #2b2b2b; }
+.cm-s-ahk-dark .CodeMirror-linenumber { color: #6e7681; }
+.cm-s-ahk-dark .CodeMirror-cursor { border-left-color: #aeafad; }
+.cm-s-ahk-dark .CodeMirror-selected, .cm-s-ahk-dark.CodeMirror-focused .CodeMirror-selected { background: #264f78 !important; }
+.cm-s-ahk-dark .CodeMirror-line::selection, .cm-s-ahk-dark .CodeMirror-line > span::selection, .cm-s-ahk-dark .CodeMirror-line > span > span::selection { background: #264f78; }
+.cm-s-ahk-dark .CodeMirror-matchingbracket { color: #fff !important; }
+
+.cm-s-ahk-dark .hljs-keyword { color: #569cd6; }
+.cm-s-ahk-dark .hljs-type { color: #4ec9b0; }
+.cm-s-ahk-dark .hljs-title.class_ { color: #4ec9b0; }
+.cm-s-ahk-dark .hljs-title.function_ { color: #dcdcaa; }
+.cm-s-ahk-dark .hljs-built_in { color: #dcdcaa; }
+.cm-s-ahk-dark .hljs-string { color: #ce9178; }
+.cm-s-ahk-dark .hljs-number { color: #b5cea8; }
+.cm-s-ahk-dark .hljs-comment { color: #6a9955; font-style: italic; }
+.cm-s-ahk-dark .hljs-meta { color: #c586c0; }
+.cm-s-ahk-dark .hljs-variable, .cm-s-ahk-dark .hljs-params, .cm-s-ahk-dark .hljs-property { color: #9cdcfe; }
+.cm-s-ahk-dark .hljs-operator, .cm-s-ahk-dark .hljs-punctuation { color: #d4d4d4; }
+.cm-s-ahk-dark .hljs-literal { color: #569cd6; }
+.cm-s-ahk-dark .hljs-symbol { color: #dcdcaa; }
+
 .lint-gutter { width: 14px; }
 
-.lint-marker { width: 9px; height: 9px; border-radius: 50%; margin: 5px 0 0 3px; cursor: help; }
-.lint-marker.lint-error { background: var(--error); }
-.lint-marker.lint-warning { background: var(--warning); }
-.lint-marker.lint-info { background: var(--info); }
+.lint-marker { width: 9px; height: 9px; border-radius: 50%; margin: 6px 0 0 3px; cursor: help; }
+.lint-marker.lint-error { background: #f14c4c; }
+.lint-marker.lint-warning { background: #cca700; }
+.lint-marker.lint-info { background: #3794ff; }
 
 .cm-lint { text-decoration-line: underline; text-decoration-style: wavy; text-decoration-thickness: 1px; text-underline-offset: 2px; }
-.cm-lint-error { text-decoration-color: var(--error); }
-.cm-lint-warning { text-decoration-color: var(--warning); }
-.cm-lint-info { text-decoration-color: var(--info); }
-.cm-node-sel { background: var(--sel-text); border-radius: 2px; }
+.cm-lint-error { text-decoration-color: #f14c4c; }
+.cm-lint-warning { text-decoration-color: #cca700; }
+.cm-lint-info { text-decoration-color: #3794ff; }
+.cm-node-sel { background: rgba(255, 209, 102, 0.22); box-shadow: 0 0 0 1px rgba(255, 209, 102, 0.55); border-radius: 2px; }
 
 .left-controls {
     display: flex;
