@@ -132,7 +132,8 @@ function renderDiagnostics() {
     diagnostics.sort((a, b) => a.range.from.line - b.range.from.line || a.range.from.col - b.range.from.col
         || SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
-    const byLine = new Map<number, Diagnostic[]>();
+    const byLine = lineDiagnostics;
+    byLine.clear();
     for (const d of diagnostics) {
         const from = toCM(d.range.from);
         let to = toCM(d.range.to);
@@ -146,9 +147,12 @@ function renderDiagnostics() {
         const worst = list.reduce((a, b) => SEVERITY_ORDER[b.severity] < SEVERITY_ORDER[a.severity] ? b : a);
         const marker = document.createElement('div');
         marker.className = `lint-marker lint-${worst.severity}`;
-        marker.title = list.map(d => d.message).join('\n\n');
+        const what = countLabel(list);
+        marker.title = `${what}. Click for details.`;
+        marker.setAttribute('aria-label', `${what} on line ${line + 1}`);
         editor.setGutterMarker(line, 'lint-gutter', marker);
     }
+    refreshHint();
 
     const panel = $('problems-list');
     const counts = { error: 0, warning: 0, info: 0 };
@@ -163,39 +167,122 @@ function renderDiagnostics() {
         panel.replaceChildren(li);
         return;
     }
-    panel.replaceChildren(...diagnostics.map(d => {
-        const li = document.createElement('li');
-        li.className = `problem sev-${d.severity}`;
-        li.tabIndex = 0;
-        const icon = document.createElement('span');
-        icon.className = 'icon';
-        icon.setAttribute('aria-label', d.severity);
-        const msg = document.createElement('span');
-        msg.className = 'msg';
-        msg.textContent = d.message;
-        const meta = document.createElement('span');
-        meta.className = 'meta';
-        meta.textContent = `${d.rule} · ${d.range.from.line + 1}:${d.range.from.col + 1}`;
-        li.append(icon, msg, meta);
-        if (d.docs) {
-            const a = document.createElement('a');
-            a.href = d.docs;
-            a.target = '_blank';
-            a.rel = 'noopener';
-            a.textContent = 'docs';
-            a.onclick = e => e.stopPropagation();
-            meta.append(' · ', a);
-        }
-        const go = () => {
-            editor.focus();
-            editor.setSelection(toCM(d.range.from), toCM(d.range.to));
-            editor.scrollIntoView({ from: toCM(d.range.from), to: toCM(d.range.to) }, 80);
-        };
-        li.onclick = go;
-        li.onkeydown = e => { if (e.key === 'Enter') go(); };
-        return li;
-    }));
+    panel.replaceChildren(...diagnostics.map(d => problemElement(d, 'li')));
 }
+
+function countLabel(list: Diagnostic[]): string {
+    const counts = { error: 0, warning: 0, info: 0 };
+    for (const d of list) counts[d.severity]++;
+    return (['error', 'warning', 'info'] as Severity[])
+        .filter(s => counts[s]).map(s => `${counts[s]} ${s}${counts[s] === 1 ? '' : 's'}`).join(', ');
+}
+
+function goToDiagnostic(d: Diagnostic) {
+    const from = toCM(d.range.from), to = toCM(d.range.to);
+    editor.focus();
+    editor.setSelection(from, to);
+    editor.scrollIntoView({ from, to }, 80);
+}
+
+/** A problem row: severity dot, message, rule and position, docs link. Click or Enter jumps to it. */
+function problemElement(d: Diagnostic, tag: 'li' | 'div'): HTMLElement {
+    const el = document.createElement(tag);
+    el.className = `problem sev-${d.severity}`;
+    el.tabIndex = 0;
+    const icon = document.createElement('span');
+    icon.className = 'icon';
+    icon.setAttribute('aria-label', d.severity);
+    const msg = document.createElement('span');
+    msg.className = 'msg';
+    msg.textContent = d.message;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = `${d.rule} · ${d.range.from.line + 1}:${d.range.from.col + 1}`;
+    el.append(icon, msg, meta);
+    if (d.docs) {
+        const a = document.createElement('a');
+        a.href = d.docs;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = 'docs';
+        a.onclick = e => e.stopPropagation();
+        meta.append(' · ', a);
+    }
+    el.onclick = () => { hideHint(); goToDiagnostic(d); };
+    el.onkeydown = e => { if (e.key === 'Enter') { hideHint(); goToDiagnostic(d); } };
+    return el;
+}
+
+// ---------------------------------------------------------------------------
+// Gutter hint: click a lint dot to see that line's problems
+
+const lineDiagnostics = new Map<number, Diagnostic[]>();
+let hint: HTMLElement | null = null;
+let hintLine = -1;
+
+function showHint(line: number, focus = true) {
+    const list = lineDiagnostics.get(line);
+    if (!list?.length) { hideHint(); return; }
+    hideHint();
+    hintLine = line;
+    hint = document.createElement('div');
+    hint.className = 'lint-hint';
+    hint.setAttribute('role', 'dialog');
+    hint.setAttribute('aria-label', `Problems on line ${line + 1}`);
+    const head = document.createElement('div');
+    head.className = 'lint-hint-head';
+    const title = document.createElement('span');
+    title.textContent = `Line ${line + 1}: ${countLabel(list)}`;
+    const close = document.createElement('button');
+    close.className = 'lint-hint-close';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Close');
+    close.onclick = hideHint;
+    head.append(title, close);
+    hint.append(head, ...list.map(d => problemElement(d, 'div')));
+    document.body.append(hint);
+    positionHint();
+    if (focus) (hint.querySelector('.problem') as HTMLElement | null)?.focus({ preventScroll: true });
+}
+
+function positionHint() {
+    if (!hint) return;
+    const marker = editor.lineInfo(hintLine)?.gutterMarkers?.['lint-gutter'] as HTMLElement | undefined;
+    const anchor = (marker?.isConnected ? marker : editor.getWrapperElement()).getBoundingClientRect();
+    const margin = 8;
+    const width = Math.min(420, window.innerWidth - 2 * margin);
+    hint.style.width = `${width}px`;
+    const left = Math.min(Math.max(margin, anchor.left), window.innerWidth - width - margin);
+    hint.style.left = `${left}px`;
+    const h = hint.offsetHeight;
+    const below = anchor.bottom + 6;
+    const top = below + h > window.innerHeight - margin && anchor.top - 6 - h > margin ? anchor.top - 6 - h : below;
+    hint.style.top = `${Math.max(margin, top)}px`;
+}
+
+function hideHint() {
+    hint?.remove();
+    hint = null;
+    hintLine = -1;
+}
+
+/** After diagnostics change, keep an open hint in sync with its line. */
+function refreshHint() {
+    if (hintLine < 0) return;
+    if (lineDiagnostics.get(hintLine)?.length) showHint(hintLine, false); else hideHint();
+}
+
+editor.on('gutterClick', (_cm: CodeMirror.Editor, line: number, gutter: string) => {
+    if (gutter !== 'lint-gutter') return;
+    if (hint && hintLine === line) hideHint(); else showHint(line);
+});
+editor.on('scroll', () => positionHint());
+window.addEventListener('resize', () => positionHint());
+document.addEventListener('pointerdown', e => {
+    const t = e.target as HTMLElement;
+    if (hint && !hint.contains(t) && !t.closest('.lint-gutter, .CodeMirror-gutter-elt')) hideHint();
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && hint) { hideHint(); editor.focus(); } });
 
 $('rules-list').replaceChildren(...LINT_RULES.map(r => {
     const li = document.createElement('li');

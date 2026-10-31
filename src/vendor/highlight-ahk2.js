@@ -1,5 +1,16 @@
 // highlight-ahk2.js - AutoHotkey v2 syntax grammar for highlight.js
 // Matches VS Code Dark+ theme colors for AHK v2 through v2.1-alpha.26
+//
+// From TrueCrimeDev/AHKv2_LLMs (e4e3f5e), with fixes found by cross-checking against
+// the ANTLR lexer on ~1,300 scripts (AHK docs examples and the AHKv2_LLMs examples):
+// - Keywords, built-ins and directives match in any case (AutoHotkey is case-insensitive).
+// - Added keywords: as, until, goto, Loop Files/Parse/Read/Reg, get/set accessors, true/false.
+// - Quoted strings end at the end of the line, so one stray quote can't color later lines.
+// - Continuation-section strings ("\n(\n...\n)") are one string.
+// - Hotkey labels only match real hotkey syntax, so " :: " inside a string isn't a hotkey.
+// - Hotstrings: trigger is a symbol; auto-replace text is shown as text, not code.
+// - Any #Directive at the start of a line (but not a # hotkey like #c::).
+// - A ; comment needs whitespace or the start of a line before it, as in AutoHotkey.
 
 hljs.registerLanguage('ahk2', function(hljs) {
 
@@ -50,16 +61,55 @@ hljs.registerLanguage('ahk2', function(hljs) {
     'Reload', 'ExitApp', 'Suspend', 'Pause'
   ].join('|') + ')';
 
-  return {
+  var ESCAPE = { begin: /`./ };
+  var STRING_DQ = { className: 'string', begin: '"', end: /"|$/, contains: [ESCAPE] };
+  var STRING_SQ = { className: 'string', begin: "'", end: /'|$/, contains: [ESCAPE] };
+  var CONT_STRING_DQ = {
+    className: 'string',
+    begin: /"(?=[^"\n]*\r?\n(?:[ \t]*;[^\n]*\r?\n)*[ \t]*\()/,
+    end: /^[ \t]*\)[^\n"]*"/
+  };
+  var CONT_STRING_SQ = {
+    className: 'string',
+    begin: /'(?=[^'\n]*\r?\n(?:[ \t]*;[^\n]*\r?\n)*[ \t]*\()/,
+    end: /^[ \t]*\)[^\n']*'/
+  };
+
+  var language = {
     name: 'AutoHotkey v2',
     aliases: ['ahk', 'ahk2', 'autohotkey'],
-    case_insensitive: false,
+    case_insensitive: true,
     contains: [
       // Block comments
       hljs.COMMENT('/\\*', '\\*/'),
 
-      // Line comments
-      hljs.COMMENT(';', '$'),
+      // Line comments: AutoHotkey requires whitespace (or line start) before ;
+      hljs.COMMENT(/(?<=^|[ \t]);/, /$/),
+
+      // Hotstrings ::trigger::replacement or :options:trigger::replacement.
+      // With the X option the replacement is code; otherwise it is literal text.
+      {
+        className: 'symbol',
+        begin: /^[ \t]*:[^:\n]*x[^:\n]*:[^\n]*?::/,
+        relevance: 5
+      },
+      {
+        className: 'symbol',
+        begin: /^[ \t]*:[^:\n]*:[^\n]*?::/,
+        relevance: 5,
+        starts: {
+          className: 'string',
+          end: /$/,
+          contains: [hljs.COMMENT(/(?<=[ \t]);/, /$/)]
+        }
+      },
+
+      // Hotkey labels: optional modifiers, a key or key name, optional "& key" and "up", then ::
+      {
+        className: 'symbol',
+        begin: /^[ \t]*[#!^+<>*~$]*(?:\w+|[^\s:])(?:[ \t]+&[ \t]+(?:\w+|[^\s:]))?(?:[ \t]+up)?::/,
+        relevance: 5
+      },
 
       // Struct definition
       STRUCT_DEF,
@@ -70,28 +120,21 @@ hljs.registerLanguage('ahk2', function(hljs) {
       // extends keyword
       EXTENDS_DEF,
 
-      // Directives - purple
+      // Directives - purple. Any #Name at the start of a line, except # hotkeys such as #c::
       {
         className: 'meta',
-        begin: /#(?:Requires|Include|Import|Module|SingleInstance|HotIf|DllLoad|Warn|ErrorStdOut|NoTrayIcon)\b/,
+        begin: /^[ \t]*#[a-z_]\w*\b(?!::)/,
         relevance: 10
       },
 
-      // Strings - double quoted
-      {
-        className: 'string',
-        begin: '"',
-        end: '"',
-        contains: [{ begin: /`./ }]
-      },
+      // Continuation-section strings: an unclosed quote, then ( ... ) on the following lines
+      CONT_STRING_DQ,
+      CONT_STRING_SQ,
 
-      // Strings - single quoted
-      {
-        className: 'string',
-        begin: "'",
-        end: "'",
-        contains: [{ begin: /`./ }]
-      },
+      // Strings. Outside continuation sections a string can't span lines,
+      // so it also ends at the end of the line.
+      STRING_DQ,
+      STRING_SQ,
 
       // Typed field annotations
       {
@@ -100,10 +143,28 @@ hljs.registerLanguage('ahk2', function(hljs) {
         relevance: 8
       },
 
+      // Loop sub-commands
+      {
+        className: 'keyword',
+        begin: /\bloop[ \t]+(?:files|parse|read|reg)\b/
+      },
+
       // Control flow keywords - blue
       {
         className: 'keyword',
-        begin: /\b(?:if|else|for|while|loop|return|break|continue|switch|case|default|try|catch|finally|throw|static|global|local|export|in|not|and|or|is|this|super|unset)\b/
+        begin: /\b(?:if|else|for|while|loop|until|return|break|continue|goto|switch|case|default|try|catch|finally|throw|as|static|global|local|export|in|not|and|or|is|this|super|unset)\b/
+      },
+
+      // Property accessors: get/set before { or =>
+      {
+        className: 'keyword',
+        begin: /\b(?:get|set)\b(?=[ \t]*(?:\{|=>))/
+      },
+
+      // true / false
+      {
+        className: 'literal',
+        begin: /\b(?:true|false)\b/
       },
 
       // Built-in variables (A_ prefix) - light blue
@@ -203,14 +264,23 @@ hljs.registerLanguage('ahk2', function(hljs) {
         className: 'number',
         begin: /\b\d+\b/,
         relevance: 0
-      },
-
-      // Hotkey labels
-      {
-        className: 'symbol',
-        begin: /^\s*[#!^+<>*~$]*\w[^\n:]*(?=::)/,
-        relevance: 5
       }
     ]
   };
+
+  // Continuation sections: a line that is just ( [options] through a line starting with ).
+  // The lines are joined, so strings inside may span lines.
+  var CONT_SECTION = {
+    begin: /^[ \t]*\((?=[^)\n]*$)/,
+    beginScope: 'punctuation',
+    end: /^[ \t]*\)/,
+    endScope: 'punctuation',
+    contains: language.contains.map(function(m) {
+      if (m === STRING_DQ) return { className: 'string', begin: '"', end: '"', contains: [ESCAPE] };
+      if (m === STRING_SQ) return { className: 'string', begin: "'", end: "'", contains: [ESCAPE] };
+      return m;
+    })
+  };
+  language.contains.splice(language.contains.indexOf(STRING_DQ), 0, CONT_SECTION);
+  return language;
 });

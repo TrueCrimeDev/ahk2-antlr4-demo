@@ -5,7 +5,9 @@
     "start": "parcel src/index.html --open",
     "build": "node -e \"require('fs').rmSync('docs',{recursive:true,force:true})\" && parcel build src/index.html --dist-dir docs --public-url ./ --no-source-maps && node scripts/root-index.mjs",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "test:highlight": "node tests/highlight.test.mjs",
+    "check:highlight-corpus": "tsx tests/highlight-corpus.mts"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +20,7 @@
     "buffer": "^6.0.3",
     "parcel": "^2.15.4",
     "process": "^0.11.10",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   },
   "dependencies": {
