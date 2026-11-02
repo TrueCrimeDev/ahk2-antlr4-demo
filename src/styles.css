@@ -15,6 +15,16 @@
     --info: #2f6fde;
     --rule-fill: #ffffff;
     --token-fill: #eef1f6;
+    --edge: #a3acba;
+    --chip-line: #3c3c3c;
+    --match-line: #1f9d55;
+    --cat-stmt: #8250df;
+    --cat-decl: #0f8a7e;
+    --cat-expr: #2f6fde;
+    --cat-value: #c2410c;
+    --cat-name: #a16207;
+    --cat-directive: #c0367a;
+    --cat-struct: #6b7280;
     --mono: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, "DejaVu Sans Mono", monospace;
     color-scheme: light;
 }
@@ -37,6 +47,16 @@
         --info: #7aa7ff;
         --rule-fill: #1b1f26;
         --token-fill: #262c36;
+        --edge: #4b5363;
+        --chip-line: #565c66;
+        --match-line: #4cc38a;
+        --cat-stmt: #c586c0;
+        --cat-decl: #4ec9b0;
+        --cat-expr: #6ea8ff;
+        --cat-value: #e2a07c;
+        --cat-name: #dcdcaa;
+        --cat-directive: #f078b4;
+        --cat-struct: #8b949e;
         color-scheme: dark;
     }
 }
@@ -309,15 +329,68 @@ body[data-tab="tokens"] .only-tree { display: none; }
 .graph-message button { margin-left: 4px; }
 .graph svg { display: block; overflow: visible; }
 .graph svg .node { cursor: pointer; }
-.graph svg .node ellipse, .graph svg .node polygon, .graph svg .node path { stroke: var(--fg); fill: var(--rule-fill); }
-.graph svg .node.kind-token path, .graph svg .node.kind-token polygon { fill: var(--token-fill); }
-.graph svg .node.kind-error path, .graph svg .node.kind-error polygon { stroke: var(--error); }
-.graph svg .node text { fill: var(--fg); font-family: var(--mono); }
-.graph svg .edge path { stroke: var(--muted); }
-.graph svg .edge polygon { stroke: var(--muted); fill: var(--muted); }
-.graph svg .node.match ellipse, .graph svg .node.match path, .graph svg .node.match polygon { fill: var(--match); }
-.graph svg .node.cur ellipse, .graph svg .node.cur path, .graph svg .node.cur polygon { stroke: var(--cur); stroke-width: 3px; }
-.graph svg .node.sel ellipse, .graph svg .node.sel path, .graph svg .node.sel polygon { fill: var(--sel); stroke-width: 2px; }
+.graph svg .node path, .graph svg .node polygon { transition: fill 0.12s, stroke 0.12s, opacity 0.15s; }
+.graph svg .node text { font-family: Arial, "Liberation Sans", Helvetica, sans-serif; }
+.graph svg .node text.t-code { font-family: var(--mono); }
+.graph svg .t-main { fill: var(--fg); }
+.graph svg .t-caption { fill: var(--muted); }
+.graph svg .t-type { fill: #8b949e; }
+
+/* Rule boxes: a tint of the category color with a stronger border */
+.graph svg .node.kind-rule path { --c: var(--cat-stmt); fill: color-mix(in srgb, var(--c) 12%, var(--panel)); stroke: color-mix(in srgb, var(--c) 70%, var(--panel)); }
+.graph svg .node.kind-rule.merged path { stroke-width: 1.6px; }
+.graph svg .node.cat-stmt path { --c: var(--cat-stmt); }
+.graph svg .node.cat-decl path { --c: var(--cat-decl); }
+.graph svg .node.cat-expr path { --c: var(--cat-expr); }
+.graph svg .node.cat-value path { --c: var(--cat-value); }
+.graph svg .node.cat-name path { --c: var(--cat-name); }
+.graph svg .node.cat-directive path { --c: var(--cat-directive); }
+.graph svg .node.cat-struct path { --c: var(--cat-struct); }
+/* Tokens: dark code chips in both themes, text colored like the editor */
+.graph svg .node.kind-token path { fill: #1e1e1e; stroke: var(--chip-line); }
+.graph svg .node.kind-error path { fill: #2d1515; stroke: var(--error); stroke-width: 2px; }
+.graph svg .edge path { stroke: var(--edge); stroke-width: 1.3px; transition: opacity 0.15s, stroke 0.15s; }
+
+.graph svg .node:hover path { stroke: var(--accent); stroke-width: 2px; }
+.graph svg .node.match path { stroke: var(--match-line); stroke-width: 3px; }
+.graph svg .node.cur path { stroke: var(--cur); stroke-width: 3px; stroke-dasharray: 5 3; }
+.graph svg .node.sel path { stroke: var(--sel); stroke-width: 3.5px; }
+.graph svg .node.kind-rule.sel path { fill: color-mix(in srgb, var(--sel) 30%, var(--panel)); }
+
+/* Selecting a node fades everything outside its subtree */
+.graph.focused svg .node:not(.in-focus) { opacity: 0.32; }
+.graph.focused svg .edge:not(.in-focus) path { opacity: 0.25; }
+.graph.focused svg .edge.in-focus path { stroke: var(--sel); stroke-width: 2px; }
+
+.cm-node-hover { background: rgba(122, 167, 255, 0.18); border-radius: 2px; }
+
+.graph-legend {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    max-width: 250px;
+    padding: 5px 9px;
+    font-size: 11.5px;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    cursor: default;
+}
+.graph-legend summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.graph-legend ul { list-style: none; margin: 5px 0 3px; padding: 0; display: grid; grid-template-columns: auto auto; gap: 3px 12px; }
+.graph-legend li { display: flex; align-items: center; gap: 7px; }
+.graph-legend p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.graph-legend .swatch { --c: var(--cat-stmt); flex: none; width: 18px; height: 12px; border-radius: 4px;
+    background: color-mix(in srgb, var(--c) 12%, var(--panel)); border: 1.5px solid color-mix(in srgb, var(--c) 70%, var(--panel)); }
+.graph-legend .swatch.cat-decl { --c: var(--cat-decl); }
+.graph-legend .swatch.cat-expr { --c: var(--cat-expr); }
+.graph-legend .swatch.cat-value { --c: var(--cat-value); }
+.graph-legend .swatch.cat-name { --c: var(--cat-name); }
+.graph-legend .swatch.cat-directive { --c: var(--cat-directive); }
+.graph-legend .swatch.cat-struct { --c: var(--cat-struct); }
+.graph-legend .swatch.token { width: 18px; height: 14px; background: #1e1e1e; border-color: #3c3c3c; color: #9cdcfe;
+    font: 10px/12px var(--mono); text-align: center; }
 
 /* Outline */
 .outline { padding: 6px 4px; font-family: var(--mono); font-size: 12.5px; }

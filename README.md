@@ -9,7 +9,12 @@ A fork of [Descolada/ahk2-antlr4-demo](https://github.com/Descolada/ahk2-antlr4-
 - **Examples picker.** A dropdown above the editor with Weird AHK parser edge cases, lint demos and a syntax tour, plus ‹ › buttons to step through them. Each one has a note on how AutoHotkey reads it and where this grammar disagrees. "Your code" keeps your own script, edits to an example are kept (with Reset to restore it), and `#ex=<id>` links open an example, e.g. [`#ex=insane-pipes`](https://truecrimedev.github.io/ahk2-antlr4-demo/#ex=insane-pipes).
 - **Click-to-source linking.** Click a node in the graph or outline to highlight its code. Move the editor cursor to mark the deepest node under it. A breadcrumb shows the selected node's path; click any part to select that ancestor.
 - **Problems panel.** Lexer and parser errors appear with positions instead of replacing the tree, plus two lint rules, all marked in the editor gutter and underlined.
-- **Graph view** with drag to pan, wheel or pinch to zoom, and Fit / 1:1 buttons. Rules are ovals, tokens are boxes.
+- **Graph view** with drag to pan, wheel or pinch to zoom, and Fit / 1:1 buttons.
+  - Boxes are colored by kind (statement, declaration, expression, literal, name, directive, structure), with a key in the corner.
+  - Boxes show the grammar's labeled alternative when there is one, such as `AssignmentExpression` or `FunctionCallAccess` instead of `singleExpression`.
+  - **Merge chains** (on by default) draws each chain of single-child rules as one box, with the wrapper rules in small gray text, and drops empty `eos` leaves. This roughly halves the number of boxes. Hover a box for its full chain.
+  - Tokens are dark code chips colored exactly like the editor's highlighting.
+  - Clicking a box selects its code and fades everything outside its subtree; click empty space to clear. Hovering a box marks its code in the editor.
 - **Outline view.** A collapsible text tree with line:column positions. It handles programs too large for Graphviz.
 - **Tokens view.** The exact token stream the parser reads after whitespace preprocessing, or every lexer token including hidden-channel comments and whitespace.
 - **Node search** across the graph and outline, with Enter / Shift+Enter to step through matches.

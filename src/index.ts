@@ -3,10 +3,10 @@ import 'codemirror/lib/codemirror.css';
 import { parseSource, Diagnostic, ParseResult, SrcPos, SrcRange, Severity } from './parse';
 import { buildModel, Model, nodeAtPos, ViewNode } from './model';
 import { lint, LINT_RULES } from './lint';
-import { GraphView } from './graph';
+import { GraphView, altLabel } from './graph';
 import { OutlineView } from './outline';
 import { TokenView } from './tokens';
-import { Highlighter } from './highlight';
+import { Highlighter, classesAt, colorForClasses } from './highlight';
 import { EXAMPLES, Example, exampleById } from './examples';
 
 type Tab = 'graph' | 'outline' | 'tokens';
@@ -33,6 +33,20 @@ const editor = CodeMirror.fromTextArea(inputEl, {
 
 new Highlighter(editor);
 
+/** UTF-16 offset of a source position in `code` (lines split on \n). */
+let lineStarts: number[] = [0];
+let lineStartsFor = '';
+function offsetIn(code: string, p: SrcPos): number {
+    if (lineStartsFor !== code) {
+        lineStarts = [0];
+        for (let i = code.indexOf('\n'); i >= 0; i = code.indexOf('\n', i + 1)) lineStarts.push(i + 1);
+        lineStartsFor = code;
+    }
+    const start = lineStarts[p.line] ?? code.length;
+    const end = p.line + 1 < lineStarts.length ? lineStarts[p.line + 1] : code.length;
+    return start + cpToUnits(code.slice(start, end), p.col);
+}
+
 function cpToUnits(text: string, cp: number): number {
     let units = 0, n = 0;
     for (const ch of text) { if (n++ >= cp) break; units += ch.length; }
@@ -56,6 +70,7 @@ function fromCM(p: CodeMirror.Position): SrcPos {
 // State
 
 let result: ParseResult | null = null;
+let parsedCode = '';
 let model: Model = { root: null, nodes: [] };
 let diagnostics: Diagnostic[] = [];
 let selected: ViewNode | null = null;
@@ -65,7 +80,15 @@ let lastEditAt = 0;
 const collapseBox = $<HTMLInputElement>('showAll');
 collapseBox.checked = store.get('collapse') === '1';
 
-const graph = new GraphView($('graph'), { onSelect: n => select(n, 'graph') });
+const graph = new GraphView($('graph'), {
+    onSelect: n => select(n, 'graph'),
+    onBackground: () => select(null, 'graph'),
+    onHover: n => hoverRange(n?.range ?? null),
+    tokenColor: n => n.range ? colorForClasses(classesAt(parsedCode, offsetIn(parsedCode, n.range.from))) : '#9cdcfe',
+});
+const mergeBox = $<HTMLInputElement>('merge-chains');
+mergeBox.checked = store.get('merge') !== '0';
+graph.merge = mergeBox.checked;
 const outline = new OutlineView($('outline'), { onSelect: n => select(n, 'outline') });
 const tokens = new TokenView($('tokens'), { onSelect: r => highlightRange(r, true) });
 
@@ -77,6 +100,7 @@ const tokens = new TokenView($('tokens'), { onSelect: r => highlightRange(r, tru
 function update(fresh = false) {
     flushSave();
     const code = editor.getValue();
+    parsedCode = code;
     result = parseSource(code);
     diagnostics = [...result.diagnostics];
     const banner = $('stale-banner');
@@ -302,6 +326,12 @@ $('rules-list').replaceChildren(...LINT_RULES.map(r => {
 // Selection, cursor sync, breadcrumb
 
 let selMark: CodeMirror.TextMarker | null = null;
+let hoverMark: CodeMirror.TextMarker | null = null;
+
+function hoverRange(range: SrcRange | null) {
+    hoverMark?.clear();
+    hoverMark = range ? editor.markText(toCM(range.from), toCM(range.to), { className: 'cm-node-hover' }) : null;
+}
 
 function highlightRange(range: SrcRange | null, scroll: boolean) {
     selMark?.clear();
@@ -339,7 +369,8 @@ function renderBreadcrumb() {
         if (i) parts.push(' › ');
         const b = document.createElement('button');
         b.className = 'crumb' + (n === selected ? ' current' : '');
-        b.textContent = n.text !== undefined ? `${n.name} ${JSON.stringify(n.text)}` : n.name;
+        const alt = altLabel(n);
+        b.textContent = n.text !== undefined ? `${n.name} ${JSON.stringify(n.text)}` : alt ? `${n.name} (${alt})` : n.name;
         b.onclick = () => select(n, 'crumb');
         parts.push(b);
     });
@@ -423,6 +454,14 @@ $('zoom-in').onclick = () => graph.zoomBy(1.25);
 $('zoom-out').onclick = () => graph.zoomBy(0.8);
 $('zoom-fit').onclick = () => graph.fit();
 $('zoom-100').onclick = () => graph.actualSize();
+mergeBox.addEventListener('change', () => {
+    store.set('merge', mergeBox.checked ? '1' : '0');
+    graph.merge = mergeBox.checked;
+    graph.resetView();
+    graphDirty = true;
+    if (activeTab === 'graph') renderGraph();
+    if (selected) graph.mark('sel', [selected]);
+});
 $('expand-all').onclick = () => outline.setAll(true);
 $('collapse-all').onclick = () => outline.setAll(false);
 const allTokensBox = $<HTMLInputElement>('all-tokens');
@@ -532,6 +571,8 @@ function showExample(id: string, opts: { updateHash?: boolean; keepHistory?: boo
     renderExampleInfo();
     if (opts.updateHash) setHash(id);
     hideHint();
+    hoverRange(null);
+    graph.resetView();
     clearTimeout(debounceTimer);
     loading = true;
     try { editor.setValue(textFor(id)); } finally { loading = false; }

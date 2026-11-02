@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang=en><link rel=stylesheet href=ahk2-antlr4-demo.1d7ec983.css><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><title>AHK v2 AST Explorer</title><link rel=icon href=data:,><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap" rel=stylesheet><link rel=stylesheet href=ahk2-antlr4-demo.d3844e16.css><body data-tab=graph>
+<!DOCTYPE html><html lang=en><link rel=stylesheet href=ahk2-antlr4-demo.1d7ec983.css><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><title>AHK v2 AST Explorer</title><link rel=icon href=data:,><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap" rel=stylesheet><link rel=stylesheet href=ahk2-antlr4-demo.4db8c38c.css><body data-tab=graph>
     <header class=app-header>
         <h1>AutoHotkey v2 AST Explorer</h1>
         <p class=byline>
@@ -65,6 +65,7 @@ Pair(a*) =&gt; a
                     <button id=zoom-in title="Zoom in" aria-label="Zoom in">+</button>
                     <button id=zoom-fit title="Fit to view">Fit</button>
                     <button id=zoom-100 title="Actual size">1:1</button>
+                    <label title="Draw chains of single-child rules as one box"><input type=checkbox id=merge-chains checked> Merge chains</label>
                 </div>
                 <div class="only-outline tool-group">
                     <button id=expand-all>Expand all</button>
@@ -84,7 +85,7 @@ Pair(a*) =&gt; a
         </section>
     </main>
 
-    <script type=module src=ahk2-antlr4-demo.f072c0e5.js></script>
+    <script type=module src=ahk2-antlr4-demo.08c0810a.js></script>
 
 
 
