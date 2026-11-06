@@ -200,6 +200,7 @@ button:hover { border-color: var(--accent); }
 
 .examples-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
     font-size: 12.5px;
@@ -208,7 +209,7 @@ button:hover { border-color: var(--accent); }
 .examples-bar select,
 .examples-bar button { height: 28px; }
 .examples-bar select {
-    flex: 1 1 auto;
+    flex: 1 1 180px;
     min-width: 0;
     font: inherit;
     font-size: 13px;
@@ -432,3 +433,23 @@ body[data-tab="tokens"] .only-tree { display: none; }
     .right { height: 75vh; flex: none; }
     .search input { width: 11rem; }
 }
+
+/* Symbol references */
+.cm-ref { background: rgba(173, 214, 255, 0.16); border-bottom: 1px solid rgba(173, 214, 255, 0.55); border-radius: 2px; }
+.cm-ref-write { background: rgba(255, 196, 96, 0.18); border-bottom-color: rgba(255, 196, 96, 0.7); }
+.cm-ref-def { outline: 1px solid rgba(173, 214, 255, 0.75); }
+.symbol-info {
+    min-height: 26px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px 4px;
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-top: -2px;
+}
+.symbol-info.active { color: var(--fg); }
+.symbol-info code { font-family: var(--mono); font-size: 12.5px; padding: 1px 5px; border-radius: 4px; background: var(--panel); border: 1px solid var(--line); }
+.symbol-info button { padding: 1px 8px; font-size: 12px; }
+.symbol-info input { font: 13px var(--mono); padding: 2px 6px; width: 14em; border: 1px solid var(--accent); border-radius: 4px; background: var(--panel); color: var(--fg); }
+.fix-btn { margin-left: 2px; padding: 1px 8px; font-size: 12px; border-color: var(--accent); color: var(--accent); }

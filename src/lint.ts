@@ -5,9 +5,12 @@ import {
     FunctionCallAccessContext, FunctionDeclarationContext, FunctionStatementContext, IdentifierExpressionContext,
     LiteralExpressionContext, MemberAccessContext, ParenthesizedExpressionContext, PostIncrementDecrementExpressionContext,
     PreIncrementDecrementExpressionContext, PrimaryExpressionContext, SingleExpressionContext, VarRefExpressionContext,
+    ConcatenateExpressionContext, RelationalExpressionContext, PropertyAssignmentContext, MethodDefinitionContext,
+    PropertyDefinitionContext, BlockContext, HotkeyContext, HotstringContext, FunctionBodyContext, StatementContext,
 } from './parser/AutoHotkeyParser';
-import { Diagnostic } from './parse';
+import { Diagnostic, Fix, SrcPos, SrcRange } from './parse';
 import { rangeOf } from './model';
+import { analyzeScopes, ScopeInfo, Scope, Ref } from './scope';
 
 const DOCS = 'https://www.autohotkey.com/docs/alpha/';
 
@@ -24,23 +27,85 @@ export const LINT_RULES: LintRuleInfo[] = [
         title: 'Callback parameter count',
         description: 'Built-ins such as Hotkey, SetTimer, OnMessage and Gui OnEvent check the callback\'s parameters when it is registered and throw "Invalid callback function" if it cannot accept what they pass.',
     },
+    {
+        id: 'global-shadow',
+        title: 'Global changed without a global declaration',
+        description: 'Functions and hotkeys are assume-local: assigning a global\'s name without "global name" makes a new local. count++ or total += x on it then throws "This local variable has not been assigned a value."',
+    },
+    {
+        id: 'name-conflict',
+        title: 'Variable named like a function or class',
+        description: 'Names ignore case, and a function or class name cannot be assigned in the scope that defines it, so t := 1 next to a function T() stops the script from loading.',
+    },
+    {
+        id: 'property-call',
+        title: 'Calling a function stored in a property',
+        description: 'obj.f() passes obj as a hidden first argument. A function stored with obj.f := () => ... or {f: () => ...} that does not expect it throws "Too many parameters passed to function." Use obj.f.Call() or (obj.f)().',
+    },
+    {
+        id: 'string-compare',
+        title: '< or > with a string',
+        description: 'AutoHotkey v2.1 throws TypeError ("Expected a Number but got a String") when < > <= >= get a non-numeric string. Use StrCompare(a, b) < 0.',
+    },
+    {
+        id: 'space-index',
+        title: 'Space before [ indexes',
+        description: 'AutoHotkey reads value [1] as value[1], even with the space, so "Total: " [1, 2].Length indexes the string instead of joining. This grammar shows a concatenation there.',
+    },
 ];
 
-export function lint(tree: Antlr4.ParseTree): Diagnostic[] {
+/** Lint a parse tree. `code` is the source it came from, used to build fixes. */
+export function lint(tree: Antlr4.ParseTree, code = '', scopes: ScopeInfo = analyzeScopes(tree)): Diagnostic[] {
     const out: Diagnostic[] = [];
+    const src = new Source(code);
     const functions = collectFunctions(tree);
+    const stored = collectStoredFunctions(tree, functions);
     walk(tree, node => {
         if (node instanceof ArgumentsContext) checkArgAlias(node, out);
         if (node instanceof FunctionCallAccessContext) {
             const parent = node.parent;
-            if (parent instanceof AccessExpressionContext) checkCallbackArity(parent.primaryExpression(), node.arguments(), functions, out);
+            if (parent instanceof AccessExpressionContext) {
+                checkCallbackArity(parent.primaryExpression(), node.arguments(), functions, out, src);
+                checkPropertyCall(parent.primaryExpression(), node.arguments(), stored, out);
+            }
         } else if (node instanceof FunctionStatementContext) {
-            checkCallbackArity(node.primaryExpression(), node.arguments(), functions, out);
+            checkCallbackArity(node.primaryExpression(), node.arguments(), functions, out, src);
+            checkPropertyCall(node.primaryExpression(), node.arguments(), stored, out);
+        } else if (node instanceof RelationalExpressionContext) {
+            checkStringCompare(node, out, src);
+        } else if (node instanceof ConcatenateExpressionContext) {
+            checkSpaceIndex(node, out, src);
         }
         return true;
     });
+    checkScopes(scopes, out, src);
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Source text, for fixes
+
+class Source {
+    private lines: string[];
+    constructor(code: string) { this.lines = code.split('\n'); }
+    get available() { return this.lines.length > 1 || this.lines[0] !== ''; }
+    line(n: number): string { return this.lines[n] ?? ''; }
+    /** Text of a range (columns are code points). */
+    text(r: SrcRange): string {
+        const out: string[] = [];
+        for (let l = r.from.line; l <= r.to.line; l++) {
+            const chars = [...this.line(l)];
+            const a = l === r.from.line ? r.from.col : 0;
+            const b = l === r.to.line ? r.to.col : chars.length;
+            out.push(chars.slice(a, b).join(''));
+        }
+        return out.join('\n');
+    }
+    indentOf(line: number): string { return /^[ \t]*/.exec(this.line(line))![0]; }
+}
+
+const at = (p: SrcPos): SrcRange => ({ from: p, to: p });
+const lineNo = (r: Ref | SrcRange) => ('range' in r ? r.range : r).from.line + 1;
 
 // ---------------------------------------------------------------------------
 // Tree helpers
@@ -241,7 +306,7 @@ function stringLiteral(e: SingleExpressionContext | null): string | null {
 }
 
 function checkCallbackArity(callee: PrimaryExpressionContext, args: ArgumentsContext | null,
-    functions: Map<string, Arity>, out: Diagnostic[]) {
+    functions: Map<string, Arity>, out: Diagnostic[], src: Source) {
     if (!args) return;
     const slots = argSlots(args);
     let calleeName: string;
@@ -272,10 +337,228 @@ function checkCallbackArity(callee: PrimaryExpressionContext, args: ArgumentsCon
     if (!arity || spec.counts.some(n => accepts(arity, n))) return;
     const range = rangeOf(slot.arg);
     if (!range) return;
-    const fix = spec.counts[0] === 0 ? 'Remove the required parameters, or make them optional with ?.' : 'Add parameters, or use (*) to accept anything.';
+    const advice = spec.counts[0] === 0 ? 'Remove the required parameters, or make them optional with ?.' : 'Add parameters, or use (*) to accept anything.';
     out.push({
         severity: spec.severity ?? 'error', rule: 'callback-arity', range, docs: DOCS + spec.docs,
         message: `${calleeName} passes ${spec.what}, but this callback ${describeArity(arity)}. `
-            + `AutoHotkey throws "Invalid callback function" when it is registered. ${fix}`,
+            + `AutoHotkey throws "Invalid callback function" when it is registered. ${advice}`,
+        fix: acceptExtraFix(slot.arg.singleExpression(), arity, Math.max(...spec.counts), src),
+    });
+}
+
+/** For an inline fat arrow that takes too few parameters: add * so it accepts the rest. */
+function acceptExtraFix(e: SingleExpressionContext | null, arity: Arity, needed: number, src: Source): Fix | undefined {
+    if (!(e instanceof FatArrowExpressionContext) || arity.variadic || arity.min > needed || !src.available) return undefined;
+    const head = e.fatArrowExpressionHead();
+    const feh = head.functionExpressionHead();
+    if (feh && !feh.functionHead()) {
+        const list = feh.formalParameterList();
+        const close = rangeOf(feh.getChild(feh.getChildCount() - 1)!);
+        if (!close) return undefined;
+        return { title: list ? 'Add , * to accept the rest' : 'Use (*) to accept anything', edits: [{ range: at(close.from), text: list ? ', *' : '*' }] };
+    }
+    const name = head.identifierName();
+    const r = rangeOf(head);
+    if (name && r && !head.BitAnd() && !head.QuestionMark()) return { title: `Use (${name.getText()}, *)`, edits: [{ range: r, text: `(${name.getText()}, *)` }] };
+    return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Rules from scope analysis: global-shadow, name-conflict
+
+function checkScopes(info: ScopeInfo, out: Diagnostic[], src: Source) {
+    for (const ref of info.refs) {
+        const sym = ref.symbol;
+        if ((ref.role === 'write' || ref.role === 'update') && (sym.kind === 'function' || sym.kind === 'class') && sym.def) {
+            const kind = sym.kind;
+            const load = kind === 'function' && ref.op === ':=' ? ' AutoHotkey won\'t load the script: "This Func cannot be assigned a value."' : ' AutoHotkey won\'t load the script.';
+            out.push({
+                severity: 'error', rule: 'name-conflict', range: ref.range,
+                message: `${ref.name} is the name of the ${kind} ${sym.def.name} (line ${lineNo(sym.def)}). Names ignore case, and a ${kind} name `
+                    + `can't be ${ref.op === 'for' || ref.op === 'catch' ? `used as a ${ref.op} variable` : ref.op === '&' ? 'passed with &' : 'assigned'} in the scope that defines it.${load} Rename the variable.`,
+            });
+        }
+    }
+    const globals = new Map<string, Ref>();
+    for (const sym of info.symbols.values()) {
+        if (sym.scope.kind === 'global' && sym.kind === 'variable' && sym.def) globals.set(sym.refs[0].lname, sym.def);
+    }
+    for (const sym of info.symbols.values()) {
+        const scope = sym.scope;
+        if (scope.kind === 'global' || sym.kind !== 'variable' || !sym.refs.length) continue;
+        const first = sym.refs[0];
+        if (scope.locals.has(first.lname) || (first.role !== 'update' && first.role !== 'read')) continue;
+        const g = globals.get(first.lname);
+        if (!g) continue;
+        const owner = scopeLabel(scope);
+        const what = first.role === 'update' ? `${first.name}${first.op === '++' || first.op === '--' ? first.op : ` ${first.op}`}` : `reading ${first.name}`;
+        out.push({
+            severity: 'warning', rule: 'global-shadow', range: first.range,
+            docs: DOCS + 'Functions.htm#Global',
+            message: `${first.name} is a global variable (line ${lineNo(g)}), but ${owner} assigns it without "global ${g.name}", `
+                + `so every ${first.name} in ${owner} is a new local variable. ${what} runs before that local has a value, so AutoHotkey throws `
+                + `"This local variable has not been assigned a value." Add "global ${g.name}" to ${owner}.`,
+            fix: globalDeclFix(scope, g.name, src),
+        });
+    }
+}
+
+function scopeLabel(s: Scope): string {
+    if (s.kind === 'hotkey') return `the ${s.name} hotkey`;
+    if (s.kind === 'arrow') return 'this function';
+    if (s.kind === 'method') return `the method ${s.name}`;
+    return `${s.name}()`;
+}
+
+/** Insert "global name" as the first line of a function or hotkey body. */
+function globalDeclFix(scope: Scope, name: string, src: Source): Fix | undefined {
+    if (!src.available) return undefined;
+    const title = `Add "global ${name}"`;
+    const n = scope.node;
+    let block: BlockContext | null = null;
+    if (n instanceof FunctionDeclarationContext) block = n.block();
+    else if (n instanceof MethodDefinitionContext) block = n.functionBody().block();
+    else if (n instanceof HotkeyContext || n instanceof HotstringContext) {
+        const stmt = n.statement();
+        block = stmt ? firstOf(stmt, BlockContext) : null;
+        if (stmt && !block) {
+            // One-line hotkey: wrap the statement in a block.
+            const r = rangeOf(stmt);
+            if (!r || r.from.line !== r.to.line) return undefined;
+            const indent = src.indentOf(r.from.line) + '    ';
+            const body = src.text(r).replace(/\s+$/, '');
+            return { title, edits: [{ range: r, text: `{\n${indent}global ${name}\n${indent}${body}\n${src.indentOf(r.from.line)}}` }] };
+        }
+    }
+    if (!block) return undefined;
+    const open = rangeOf(block.getChild(0)!);
+    if (!open) return undefined;
+    const rest = [...src.line(open.to.line)].slice(open.to.col).join('').trim();
+    const next = block.getChildCount() > 2 ? rangeOf(block.getChild(1)!) : null;
+    let indent = src.indentOf(open.from.line) + '    ';
+    for (let l = open.to.line + 1; next && l <= next.to.line + 1; l++) {
+        if (src.line(l).trim()) { indent = src.indentOf(l); break; }
+    }
+    return { title, edits: [{ range: at(open.to), text: `\n${indent}global ${name}${rest ? `\n${indent}` : ''}` }] };
+}
+
+function firstOf<T>(n: Antlr4.ParseTree, type: new (...a: any[]) => T): T | null {
+    let found: T | null = null;
+    walk(n, c => {
+        if (found) return false;
+        if (c instanceof type) { found = c; return false; }
+        return true;
+    });
+    return found;
+}
+
+// ---------------------------------------------------------------------------
+// Rule: property-call
+
+interface StoredFunction { arity: Arity; range: SrcRange }
+
+/** Functions stored in properties: obj.name := (...) => ... or {name: (...) => ...}. Names that are class methods or properties are left out. */
+function collectStoredFunctions(tree: Antlr4.ParseTree, functions: Map<string, Arity>): Map<string, StoredFunction[]> {
+    const map = new Map<string, StoredFunction[]>();
+    const members = new Set<string>();
+    const add = (name: string, value: SingleExpressionContext | null, at: Antlr4.ParseTree) => {
+        const arity = arityOfExpr(value, functions);
+        const range = rangeOf(at);
+        if (!arity || !range) return;
+        const key = name.toLowerCase();
+        map.set(key, [...(map.get(key) ?? []), { arity, range }]);
+    };
+    walk(tree, n => {
+        if (n instanceof MethodDefinitionContext) members.add(n.functionHead().identifierName().getText().toLowerCase());
+        else if (n instanceof PropertyDefinitionContext) members.add(n.classPropertyName().propertyName().getText().toLowerCase());
+        else if (n instanceof AssignmentExpressionContext && n.assignmentOperator().getText() === ':=') {
+            const target = n.primaryExpression();
+            if (target instanceof AccessExpressionContext && target.accessSuffix() instanceof MemberAccessContext) {
+                const m = target.accessSuffix() as MemberAccessContext;
+                if (!m.memberIndexArguments()) add(m.memberIdentifier().getText(), n.singleExpression(), n);
+            }
+        } else if (n instanceof PropertyAssignmentContext) {
+            add(n.memberIdentifier().getText(), n.singleExpression(), n);
+        }
+        return true;
+    });
+    for (const m of members) map.delete(m);
+    return map;
+}
+
+function checkPropertyCall(callee: PrimaryExpressionContext, args: ArgumentsContext | null,
+    stored: Map<string, StoredFunction[]>, out: Diagnostic[]) {
+    if (!(callee instanceof AccessExpressionContext) || !(callee.accessSuffix() instanceof MemberAccessContext)) return;
+    const member = callee.accessSuffix() as MemberAccessContext;
+    if (member.memberIndexArguments()) return;
+    const name = member.memberIdentifier().getText();
+    const candidates = stored.get(name.toLowerCase());
+    if (!candidates) return;
+    const slots = argSlots(args);
+    if (slots.some(s => s.arg.Multiply())) return;
+    const argc = slots.length ? slots[slots.length - 1].index + 1 : 0;
+    // Only when the hidden first argument is what breaks the call.
+    if (candidates.some(c => accepts(c.arity, argc + 1)) || !candidates.some(c => accepts(c.arity, argc))) return;
+    const c = candidates.find(c => accepts(c.arity, argc))!;
+    const obj = callee.primaryExpression().getText();
+    const range = rangeOf(callee.parent ?? callee);
+    const nameRange = rangeOf(member.memberIdentifier());
+    if (!range || !nameRange) return;
+    out.push({
+        severity: 'error', rule: 'property-call', range,
+        docs: DOCS + 'Objects.htm',
+        message: `${obj}.${name}(...) passes ${obj} as a hidden first argument, so the function stored in ${name} (line ${lineNo(c.range)}) `
+            + `gets ${argc + 1} argument${argc ? 's' : ''} but ${describeArity(c.arity)}. AutoHotkey throws "Too many parameters passed to function." `
+            + `Call it as ${obj}.${name}.Call(...) or (${obj}.${name})(...), or give the function a first parameter for the object.`,
+        fix: { title: `Use ${name}.Call(...)`, edits: [{ range: at(nameRange.to), text: '.Call' }] },
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Rule: string-compare
+
+const NUMERIC = /^\s*[+-]?(0x[0-9a-f]+|(\d+\.?\d*|\.\d+)(e[+-]?\d+)?)\s*$/i;
+
+function checkStringCompare(node: RelationalExpressionContext, out: Diagnostic[], src: Source) {
+    const [left, right] = node.singleExpression();
+    const opNode = node.LessThan() ?? node.MoreThan() ?? node.LessThanEquals() ?? node.GreaterThanEquals();
+    if (!left || !right || !opNode) return;
+    const op = opNode.getText();
+    const bad = [left, right].map(stringLiteral).find(s => s !== null && !NUMERIC.test(s));
+    if (bad === undefined) return;
+    const range = rangeOf(node);
+    const lr = rangeOf(left), rr = rangeOf(right);
+    if (!range || !lr || !rr) return;
+    out.push({
+        severity: 'warning', rule: 'string-compare', range,
+        docs: DOCS + 'lib/StrCompare.htm',
+        message: `${op} needs numbers. AutoHotkey v2.1 throws TypeError ("Expected a Number but got a String") for the string "${bad}" `
+            + `(tested on 2.1-alpha.32 and .37). Compare strings with StrCompare(a, b) ${op} 0.`,
+        fix: src.available ? { title: `Use StrCompare(...) ${op} 0`, edits: [{ range, text: `StrCompare(${src.text(lr)}, ${src.text(rr)}) ${op} 0` }] } : undefined,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Rule: space-index
+
+function checkSpaceIndex(node: ConcatenateExpressionContext, out: Diagnostic[], src: Source) {
+    if (node.ConcatDot()) return;
+    const [left, right] = node.singleExpression();
+    if (!left || !right || right.start?.text !== '[') return;
+    const lr = rangeOf(left), rr = rangeOf(right);
+    if (!lr || !rr) return;
+    const gap: SrcRange = { from: lr.to, to: rr.from };
+    const text = (r: SrcRange) => src.available ? src.text(r) : '';
+    const str = stringLiteral(left) !== null;
+    out.push({
+        severity: str ? 'warning' : 'info', rule: 'space-index', range: { from: lr.from, to: rr.to },
+        message: str
+            ? `AutoHotkey reads this as indexing the string with [...], not as joining it with what follows, and throws PropertyError (a String has no __Item). `
+                + `This grammar shows a concatenation here. To join, put . between them.`
+            : `AutoHotkey reads ${text(lr) || 'this'} [...] as indexing ${text(lr) || 'the value'}, even with the space. This grammar shows a concatenation here. `
+                + `Remove the space to make the indexing clear, or put . between them to join.`,
+        fix: gap.from.line === gap.to.line && src.available
+            ? str ? { title: 'Join with .', edits: [{ range: gap, text: ' . ' }] } : { title: 'Remove the space', edits: [{ range: gap, text: '' }] }
+            : undefined,
     });
 }

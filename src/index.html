@@ -30,6 +30,9 @@
                 <select id="examples"></select>
                 <button id="ex-next" class="step" title="Next example" aria-label="Next example">›</button>
                 <button id="ex-reset" title="Restore the original example. Ctrl+Z brings your edits back." hidden>Reset</button>
+                <button id="share" title="Copy a link that opens this code">Share</button>
+                <button id="open-file" title="Open an .ahk file (or drop one on the editor)">Open…</button>
+                <input type="file" id="file-input" accept=".ahk,.ah2,.ahk2,.txt" hidden>
             </div>
             <p id="ex-note" class="ex-note"></p>
             <div class="editor-area">
@@ -47,6 +50,7 @@ Hotkey "F1", () => MsgBox("hi")   ; error: Hotkey passes 1 argument
 Pair(a*) => a
 </textarea>
             </div>
+            <div id="symbol-info" class="symbol-info" aria-live="polite"></div>
             <div class="left-controls">
                 <label><input type="checkbox" id="showAll"> Collapse to terminal nodes</label>
                 <span id="status" class="status"></span>

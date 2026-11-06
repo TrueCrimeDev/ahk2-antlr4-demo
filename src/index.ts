@@ -8,6 +8,7 @@ import { OutlineView } from './outline';
 import { TokenView } from './tokens';
 import { Highlighter, classesAt, colorForClasses } from './highlight';
 import { EXAMPLES, Example, exampleById } from './examples';
+import { analyzeScopes, ScopeInfo, Ref, refAt, describeSymbol } from './scope';
 
 type Tab = 'graph' | 'outline' | 'tokens';
 
@@ -29,6 +30,10 @@ const editor = CodeMirror.fromTextArea(inputEl, {
     gutters: ['lint-gutter', 'CodeMirror-linenumbers'],
     indentUnit: 4,
     tabSize: 4,
+    extraKeys: {
+        F12: () => goToDefinition(fromCM(editor.getCursor())),
+        F2: () => startRename(),
+    },
 });
 
 new Highlighter(editor);
@@ -71,6 +76,7 @@ function fromCM(p: CodeMirror.Position): SrcPos {
 
 let result: ParseResult | null = null;
 let parsedCode = '';
+let scopes: ScopeInfo | null = null;
 let model: Model = { root: null, nodes: [] };
 let diagnostics: Diagnostic[] = [];
 let selected: ViewNode | null = null;
@@ -105,7 +111,8 @@ function update(fresh = false) {
     diagnostics = [...result.diagnostics];
     const banner = $('stale-banner');
     if (result.tree && result.parser) {
-        diagnostics.push(...lint(result.tree));
+        scopes = analyzeScopes(result.tree);
+        diagnostics.push(...lint(result.tree, code, scopes));
         model = buildModel(result.tree, result.parser, collapseBox.checked);
         banner.hidden = true;
         refreshViews();
@@ -215,6 +222,17 @@ function goToDiagnostic(d: Diagnostic) {
 }
 
 /** A problem row: severity dot, message, rule and position, docs link. Click or Enter jumps to it. */
+/** Apply a fix's edits in one undoable step, from the end of the document backward. */
+function applyFix(d: Diagnostic) {
+    if (!d.fix) return;
+    const edits = [...d.fix.edits].sort((a, b) => b.range.from.line - a.range.from.line || b.range.from.col - a.range.from.col);
+    editor.operation(() => {
+        for (const e of edits) editor.replaceRange(e.text, toCM(e.range.from), toCM(e.range.to), '+fix');
+    });
+    editor.focus();
+    editor.setCursor(toCM(edits[edits.length - 1].range.from));
+}
+
 function problemElement(d: Diagnostic, tag: 'li' | 'div'): HTMLElement {
     const el = document.createElement(tag);
     el.className = `problem sev-${d.severity}`;
@@ -237,6 +255,15 @@ function problemElement(d: Diagnostic, tag: 'li' | 'div'): HTMLElement {
         a.textContent = 'docs';
         a.onclick = e => e.stopPropagation();
         meta.append(' · ', a);
+    }
+    if (d.fix) {
+        const btn = document.createElement('button');
+        btn.className = 'fix-btn';
+        btn.textContent = `Fix: ${d.fix.title}`;
+        btn.title = 'Apply this change to the code (Ctrl+Z undoes it)';
+        btn.onclick = e => { e.stopPropagation(); hideHint(); applyFix(d); };
+        btn.onkeydown = e => e.stopPropagation();
+        meta.append(' ', btn);
     }
     el.onclick = () => { hideHint(); goToDiagnostic(d); };
     el.onkeydown = e => { if (e.key === 'Enter') { hideHint(); goToDiagnostic(d); } };
@@ -385,8 +412,110 @@ function renderBreadcrumb() {
     bar.scrollLeft = bar.scrollWidth;
 }
 
+// ---------------------------------------------------------------------------
+// Symbols: references, definitions, rename
+
+let refMarks: CodeMirror.TextMarker[] = [];
+let currentRef: Ref | null = null;
+const symbolBar = $('symbol-info');
+const SYMBOL_HINT = 'Put the cursor on a name to see its references. Ctrl+click or F12 jumps to its definition; F2 renames it.';
+
+function showReferences(pos: SrcPos) {
+    const ref = scopes && parsedCode === editor.getValue() ? refAt(scopes, pos) : null;
+    if (ref === currentRef && (ref || refMarks.length === 0)) return;
+    currentRef = ref;
+    for (const m of refMarks) m.clear();
+    refMarks = [];
+    if (!ref) { renderSymbolBar(null); return; }
+    const sym = ref.symbol;
+    editor.operation(() => {
+        for (const r of sym.refs) {
+            const cls = r === sym.def ? 'cm-ref cm-ref-def' : r.role === 'read' ? 'cm-ref' : 'cm-ref cm-ref-write';
+            refMarks.push(editor.markText(toCM(r.range.from), toCM(r.range.to), { className: cls }));
+        }
+    });
+    renderSymbolBar(ref);
+}
+
+function renderSymbolBar(ref: Ref | null) {
+    if (!ref) { symbolBar.replaceChildren(SYMBOL_HINT); symbolBar.classList.remove('active'); return; }
+    const sym = ref.symbol;
+    symbolBar.classList.add('active');
+    const name = document.createElement('code');
+    name.textContent = sym.name;
+    const writes = sym.refs.filter(r => r.role === 'write' || r.role === 'update').length;
+    const parts: (string | Node)[] = [name, ` ${describeSymbol(sym, ref.scope)} · ${sym.refs.length} reference${sym.refs.length === 1 ? '' : 's'}`];
+    if (writes) parts.push(`, ${writes} write${writes === 1 ? '' : 's'}`);
+    if (sym.def && sym.def !== ref) {
+        const go = document.createElement('button');
+        go.textContent = `Definition (line ${sym.def.range.from.line + 1})`;
+        go.onclick = () => goToDefinition(ref.range.from);
+        parts.push(' ', go);
+    }
+    if (sym.def) {
+        const rename = document.createElement('button');
+        rename.textContent = 'Rename';
+        rename.onclick = () => startRename();
+        parts.push(' ', rename);
+    }
+    symbolBar.replaceChildren(...parts);
+}
+
+function goToDefinition(pos: SrcPos) {
+    const ref = scopes ? refAt(scopes, pos) : null;
+    const def = ref?.symbol.def;
+    if (!def) return;
+    editor.focus();
+    editor.setSelection(toCM(def.range.from), toCM(def.range.to));
+    editor.scrollIntoView({ from: toCM(def.range.from), to: toCM(def.range.to) }, 60);
+}
+
+/** Inline rename: the bar becomes a text field; Enter renames every reference of the symbol. */
+function startRename() {
+    const ref = currentRef ?? (scopes ? refAt(scopes, fromCM(editor.getCursor())) : null);
+    if (!ref?.symbol.def) return;
+    const sym = ref.symbol;
+    const input = document.createElement('input');
+    input.value = sym.name;
+    input.setAttribute('aria-label', `New name for ${sym.name}`);
+    const note = document.createElement('span');
+    note.textContent = ` Rename ${sym.refs.length} reference${sym.refs.length === 1 ? '' : 's'} (Enter to apply, Esc to cancel)`;
+    symbolBar.replaceChildren('Rename ', input, note);
+    input.focus();
+    input.select();
+    const finish = (apply: boolean) => {
+        const value = input.value.trim();
+        if (apply && /^[A-Za-z_\u0080-\uffff][\w\u0080-\uffff]*$/.test(value) && value !== sym.name) {
+            const refs = [...sym.refs].sort((a, b) => b.range.from.line - a.range.from.line || b.range.from.col - a.range.from.col);
+            editor.operation(() => {
+                for (const r of refs) editor.replaceRange(value, toCM(r.range.from), toCM(r.range.to), '+rename');
+            });
+        } else if (apply && value !== sym.name) {
+            note.textContent = ' That is not a valid name.';
+            return;
+        }
+        currentRef = null;
+        editor.focus();
+        renderSymbolBar(null);
+    };
+    input.onkeydown = e => {
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    };
+    input.onblur = () => { if (symbolBar.contains(input)) finish(false); };
+}
+
+editor.on('mousedown', (_cm: CodeMirror.Editor, e: MouseEvent) => {
+    if (!(e.ctrlKey || e.metaKey) || e.button !== 0) return;
+    const pos = fromCM(editor.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+    if (!scopes || !refAt(scopes, pos)?.symbol.def) return;
+    e.preventDefault();
+    goToDefinition(pos);
+});
+
 function syncCursor(reveal: boolean) {
     const pos = fromCM(editor.getCursor());
+    showReferences(pos);
     const node = model.root ? nodeAtPos(model, pos) : null;
     const list = node ? [node] : [];
     graph.mark('cur', list);
@@ -481,6 +610,8 @@ collapseBox.addEventListener('change', () => {
 // localStorage, so switching never loses anything. #ex=<id> links open an example.
 
 const MINE = 'mine';
+/** Code from a shared link or an opened file. Kept apart from "Your code". */
+const SCRATCH = 'scratch';
 const DEFAULT_EXAMPLE = 'arg-alias';
 const MINE_STARTER = '; Your code. Type or paste AutoHotkey v2 code here.\n';
 const exSelect = $<HTMLSelectElement>('examples');
@@ -504,7 +635,10 @@ if (legacy !== null) {
 const editedKey = (ex: Example) => 'ex:' + ex.id;
 const isEdited = (ex: Example) => store.get(editedKey(ex)) !== null;
 
+const isSlot = (id: string | null) => id === MINE || id === SCRATCH && store.get(SCRATCH) !== null || !!(id && exampleById(id));
+
 function textFor(id: string): string {
+    if (id === SCRATCH) return store.get(SCRATCH) ?? '';
     const ex = exampleById(id);
     if (!ex) return store.get(MINE) ?? MINE_STARTER;
     return store.get(editedKey(ex)) ?? ex.code;
@@ -526,7 +660,16 @@ function buildPicker() {
         group.append(opt);
         renderOptionLabel(ex);
     }
-    exSelect.replaceChildren(mine, ...groups.values());
+    const scratch = new Option('', SCRATCH);
+    exOptions.set(SCRATCH, scratch);
+    exSelect.replaceChildren(mine, scratch, ...groups.values());
+    renderScratchOption();
+}
+
+function renderScratchOption() {
+    const opt = exOptions.get(SCRATCH)!;
+    opt.textContent = store.get('scratch-label') ?? 'Shared or opened code';
+    opt.hidden = opt.disabled = store.get(SCRATCH) === null;
 }
 
 function renderOptionLabel(ex: Example) {
@@ -535,7 +678,9 @@ function renderOptionLabel(ex: Example) {
 
 function renderExampleInfo() {
     const ex = exampleById(current);
-    exNote.textContent = ex ? ex.note : 'Your own code, saved in this browser. Switching to an example keeps it.';
+    exNote.textContent = ex ? ex.note
+        : current === SCRATCH ? `${store.get('scratch-label') ?? 'Shared code'}. It's kept in this browser apart from Your code.`
+        : 'Your own code, saved in this browser. Switching to an example keeps it.';
     exReset.hidden = !(ex && isEdited(ex));
 }
 
@@ -544,6 +689,7 @@ function flushSave() {
     if (!unsaved) return;
     unsaved = false;
     const code = editor.getValue();
+    if (current === SCRATCH) { store.set(SCRATCH, code); return; }
     const ex = exampleById(current);
     if (!ex) { store.set(MINE, code); return; }
     const was = isEdited(ex);
@@ -552,7 +698,7 @@ function flushSave() {
 }
 
 function setHash(id: string) {
-    const want = id === MINE ? '' : `#ex=${id}`;
+    const want = id === MINE || id === SCRATCH ? '' : `#ex=${id}`;
     if (location.hash === want) return;
     try { history.replaceState(null, '', want || location.pathname + location.search); } catch { location.hash = want; }
 }
@@ -564,7 +710,7 @@ function hashExample(): string | null {
 
 function showExample(id: string, opts: { updateHash?: boolean; keepHistory?: boolean } = {}) {
     flushSave();
-    if (id !== MINE && !exampleById(id)) id = MINE;
+    if (!isSlot(id)) id = MINE;
     current = id;
     store.set('current', id);
     exSelect.value = id;
@@ -602,8 +748,108 @@ exReset.onclick = () => {
     showExample(ex.id, { keepHistory: true });
 };
 window.addEventListener('hashchange', () => {
+    if (location.hash.startsWith('#code=')) { void openSharedLink(); return; }
     const id = hashExample();
     if (id && id !== current) showExample(id);
+});
+
+// ---------------------------------------------------------------------------
+// Share links and opening files
+
+/** Put code in the scratch slot and show it. */
+function openScratch(code: string, label: string) {
+    flushSave();
+    store.set(SCRATCH, code);
+    store.set('scratch-label', label);
+    renderScratchOption();
+    showExample(SCRATCH);
+}
+
+function b64url(bytes: Uint8Array): string {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+const unb64url = (s: string) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+async function pipe(bytes: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
+    const out = new Response(new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(stream));
+    return new Uint8Array(await out.arrayBuffer());
+}
+
+/** #code=z:<deflated, base64url> when the browser can compress, else #code=u:<UTF-8, base64url>. */
+async function encodeCode(code: string): Promise<string> {
+    const raw = new TextEncoder().encode(code);
+    if (typeof CompressionStream === 'function') {
+        try { return 'z:' + b64url(await pipe(raw, new CompressionStream('deflate-raw'))); } catch { /* fall back */ }
+    }
+    return 'u:' + b64url(raw);
+}
+
+async function decodeCode(data: string): Promise<string> {
+    const [kind, body] = [data.slice(0, 2), data.slice(2)];
+    const bytes = unb64url(body);
+    if (kind === 'z:') return new TextDecoder().decode(await pipe(bytes, new DecompressionStream('deflate-raw')));
+    if (kind === 'u:') return new TextDecoder().decode(bytes);
+    throw new Error('unknown link format');
+}
+
+async function openSharedLink(): Promise<boolean> {
+    const m = /^#code=(.+)$/.exec(location.hash);
+    if (!m) return false;
+    try {
+        const code = await decodeCode(decodeURIComponent(m[1]));
+        try { history.replaceState(null, '', location.pathname + location.search); } catch { /* keep the hash */ }
+        openScratch(code, 'Shared link');
+        return true;
+    } catch {
+        exNote.textContent = 'That share link could not be read. It may have been cut off when it was copied.';
+        return false;
+    }
+}
+
+const shareBtn = $('share');
+shareBtn.onclick = async () => {
+    flushSave();
+    const code = editor.getValue();
+    const ex = exampleById(current);
+    // An unedited example has a short link already.
+    const hash = ex && code === ex.code ? `#ex=${ex.id}` : `#code=${await encodeCode(code)}`;
+    const url = location.origin + location.pathname + location.search + hash;
+    let copied = false;
+    try { await navigator.clipboard.writeText(url); copied = true; } catch { /* clipboard blocked */ }
+    if (!copied) { try { history.replaceState(null, '', hash); } catch { location.hash = hash; } }
+    exNote.textContent = copied
+        ? `Link copied (${url.length.toLocaleString()} characters). Anyone who opens it sees this code.`
+        : 'Copying was blocked, so the link is in the address bar now. Copy it from there.';
+};
+
+async function readFileText(file: File): Promise<string> {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    // AutoHotkey scripts are often UTF-8 with a BOM, sometimes UTF-16.
+    if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+    if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+    const text = new TextDecoder().decode(buf);
+    return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+async function openFile(file: File) {
+    if (file.size > 5_000_000) { exNote.textContent = `${file.name} is over 5 MB, which is too large to explore here.`; return; }
+    openScratch((await readFileText(file)).replace(/\r\n?/g, '\n'), `Opened: ${file.name}`);
+}
+
+const fileInput = $<HTMLInputElement>('file-input');
+$('open-file').onclick = () => fileInput.click();
+fileInput.onchange = () => {
+    const f = fileInput.files?.[0];
+    if (f) void openFile(f);
+    fileInput.value = '';
+};
+editor.on('drop', (_cm: CodeMirror.Editor, e: DragEvent) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    e.preventDefault();
+    void openFile(f);
 });
 window.addEventListener('pagehide', flushSave);
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
@@ -626,6 +872,7 @@ editor.on('cursorActivity', () => {
 });
 
 setTab(activeTab);
+renderSymbolBar(null);
 const storedCurrent = store.get('current');
-showExample(hashExample()
-    ?? (storedCurrent === MINE || (storedCurrent && exampleById(storedCurrent)) ? storedCurrent! : DEFAULT_EXAMPLE));
+showExample(hashExample() ?? (isSlot(storedCurrent) ? storedCurrent! : DEFAULT_EXAMPLE));
+void openSharedLink();

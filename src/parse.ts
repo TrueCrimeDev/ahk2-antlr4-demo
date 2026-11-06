@@ -16,7 +16,13 @@ export interface Diagnostic {
     range: SrcRange;
     /** Optional link to documentation that explains the rule. */
     docs?: string;
+    /** A one-click fix: text edits applied together. */
+    fix?: Fix;
 }
+
+/** Replace `range` with `text`; an empty range inserts. */
+export interface TextEdit { range: SrcRange; text: string }
+export interface Fix { title: string; edits: TextEdit[] }
 
 export interface ParseResult {
     tree: ProgramContext | null;

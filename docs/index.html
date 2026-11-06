@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang=en><link rel=stylesheet href=ahk2-antlr4-demo.1d7ec983.css><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><title>AHK v2 AST Explorer</title><link rel=icon href=data:,><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap" rel=stylesheet><link rel=stylesheet href=ahk2-antlr4-demo.4db8c38c.css><body data-tab=graph>
+<!DOCTYPE html><html lang=en><link rel=stylesheet href=ahk2-antlr4-demo.1d7ec983.css><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><title>AHK v2 AST Explorer</title><link rel=icon href=data:,><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap" rel=stylesheet><link rel=stylesheet href=ahk2-antlr4-demo.979ff64b.css><body data-tab=graph>
     <header class=app-header>
         <h1>AutoHotkey v2 AST Explorer</h1>
         <p class=byline>
@@ -16,6 +16,9 @@
                 <select id=examples></select>
                 <button id=ex-next class=step title="Next example" aria-label="Next example">›</button>
                 <button id=ex-reset title="Restore the original example. Ctrl+Z brings your edits back." hidden>Reset</button>
+                <button id=share title="Copy a link that opens this code">Share</button>
+                <button id=open-file title="Open an .ahk file (or drop one on the editor)">Open…</button>
+                <input type=file id=file-input accept=.ahk,.ah2,.ahk2,.txt hidden>
             </div>
             <p id=ex-note class=ex-note></p>
             <div class=editor-area>
@@ -33,6 +36,7 @@ Hotkey "F1", () =&gt; MsgBox("hi")   ; error: Hotkey passes 1 argument
 Pair(a*) =&gt; a
 </textarea>
             </div>
+            <div id=symbol-info class=symbol-info aria-live=polite></div>
             <div class=left-controls>
                 <label><input type=checkbox id=showAll> Collapse to terminal nodes</label>
                 <span id=status class=status></span>
@@ -85,7 +89,7 @@ Pair(a*) =&gt; a
         </section>
     </main>
 
-    <script type=module src=ahk2-antlr4-demo.08c0810a.js></script>
+    <script type=module src=ahk2-antlr4-demo.d27a662d.js></script>
 
 
 

@@ -265,6 +265,29 @@ m.Add("Save", () => 0)                 ; warning: Menu.Add passes 3
 `,
     },
     {
+        id: 'more-checks',
+        group: LINT,
+        title: 'Globals, names, stored functions, < and [',
+        note: 'Each flagged line fails on AutoHotkey v2.1. Use a problem\'s Fix button to repair it, and put the cursor on count to see which counts are the same variable.',
+        code: `count := 0
+Bump() {
+    count++                         ; warning: this count is a new local
+}
+^F1::count++                        ; same problem in a hotkey
+
+o := {greet: () => "hi"}
+o.greet()                           ; error: o is passed as a hidden first argument
+
+if ("apple" < "banana")             ; warning: < throws on strings in v2.1
+    MsgBox "sorted"
+
+MsgBox "Items: " [1, 2, 3].Length   ; warning: this indexes the string
+
+Total() => 0
+total := 5                          ; error: total is the function Total
+`,
+    },
+    {
         id: 'hotkeys-directives',
         group: SYNTAX,
         title: 'Hotkeys, hotstrings and directives',

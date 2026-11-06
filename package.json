@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "scripts": {
     "start": "parcel src/index.html --open",
-    "build": "node -e \"require('fs').rmSync('docs',{recursive:true,force:true})\" && parcel build src/index.html --dist-dir docs --public-url ./ --no-source-maps && node scripts/root-index.mjs",
+    "build": "node -e \"require('fs').rmSync('docs',{recursive:true,force:true})\" && parcel build src/index.html --dist-dir docs --public-url ./ --no-source-maps && node scripts/root-index.mjs && npm run -s build:cli",
     "test": "echo \"Error: no test specified\" && exit 1",
     "typecheck": "tsc --noEmit -p .",
     "test:highlight": "node tests/highlight.test.mjs",
-    "check:highlight-corpus": "tsx tests/highlight-corpus.mts"
+    "check:highlight-corpus": "tsx tests/highlight-corpus.mts",
+    "test:lint": "tsx tests/lint.test.mts",
+    "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node18 --minify --legal-comments=none --banner:js='#!/usr/bin/env node' --outfile=cli/ahk-ast.mjs"
   },
   "keywords": [],
   "author": "",
@@ -15,9 +17,11 @@
   "description": "AutoHotkey v2 AST explorer built on Descolada's ANTLR4 grammar",
   "devDependencies": {
     "@types/codemirror": "^5.60.18",
+    "@types/node": "^20.19.43",
     "@types/viz.js": "^2.1.5",
     "antlr4ng": "^3.0.16",
     "buffer": "^6.0.3",
+    "esbuild": "^0.24.2",
     "parcel": "^2.15.4",
     "process": "^0.11.10",
     "tsx": "^4.23.15",

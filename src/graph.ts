@@ -1,6 +1,5 @@
 import Viz from 'viz.js';
 import { Module, render } from 'viz.js/full.render.js';
-import * as Parser from './parser/AutoHotkeyParser';
 import { Model, ViewNode } from './model';
 
 export interface GraphCallbacks {
@@ -18,18 +17,8 @@ const MAX_AUTO_NODES = 2500;
 // ---------------------------------------------------------------------------
 // What a node is called and how it is colored
 
-/** Labeled grammar alternatives (# AssignmentExpression etc.) by context class. */
-const ALT_LABELS = new Map<Function, string>();
-for (const [name, value] of Object.entries(Parser)) {
-    if (typeof value === 'function' && name.endsWith('Context')) ALT_LABELS.set(value, name.slice(0, -'Context'.length));
-}
-
-/** The grammar's label for this alternative (AssignmentExpression, FunctionCallAccess, ...), if it has one. */
-export function altLabel(n: ViewNode): string | null {
-    if (n.kind !== 'rule') return null;
-    const label = ALT_LABELS.get((n.tree as object).constructor);
-    return label && label.toLowerCase() !== n.name.toLowerCase() ? label : null;
-}
+import { altLabel } from './labels';
+export { altLabel };
 
 export type Category = 'stmt' | 'decl' | 'expr' | 'value' | 'name' | 'directive' | 'struct';
 
