@@ -6,7 +6,8 @@ import { lint, LINT_RULES } from './lint';
 import { GraphView, altLabel } from './graph';
 import { OutlineView } from './outline';
 import { TokenView } from './tokens';
-import { Highlighter, classesAt, colorForClasses } from './highlight';
+import { Highlighter, classesAt, colorForClasses, highlightSnippet } from './highlight';
+import { Tip, installSimpleTips, severityIcon, el, kbd } from './tooltip';
 import { EXAMPLES, Example, exampleById } from './examples';
 import { analyzeScopes, ScopeInfo, Ref, refAt, describeSymbol } from './scope';
 
@@ -175,7 +176,7 @@ function renderDiagnostics() {
         const from = toCM(d.range.from);
         let to = toCM(d.range.to);
         if (to.line === from.line && to.ch === from.ch) to = { line: to.line, ch: to.ch + 1 };
-        lintMarks.push(editor.markText(from, to, { className: `cm-lint cm-lint-${d.severity}`, attributes: { title: d.message } }));
+        lintMarks.push(editor.markText(from, to, { className: `cm-lint cm-lint-${d.severity}` }));
         const list = byLine.get(from.line) ?? [];
         list.push(d);
         byLine.set(from.line, list);
@@ -233,38 +234,42 @@ function applyFix(d: Diagnostic) {
     editor.setCursor(toCM(edits[edits.length - 1].range.from));
 }
 
-function problemElement(d: Diagnostic, tag: 'li' | 'div'): HTMLElement {
-    const el = document.createElement(tag);
-    el.className = `problem sev-${d.severity}`;
-    el.tabIndex = 0;
-    const icon = document.createElement('span');
-    icon.className = 'icon';
-    icon.setAttribute('aria-label', d.severity);
-    const msg = document.createElement('span');
-    msg.className = 'msg';
-    msg.textContent = d.message;
-    const meta = document.createElement('span');
-    meta.className = 'meta';
-    meta.textContent = `${d.rule} · ${d.range.from.line + 1}:${d.range.from.col + 1}`;
-    el.append(icon, msg, meta);
+/** "rule · Ln 3, Col 5 · Docs · [Fix]" under a problem, in the list, the gutter popup and hovers. */
+function diagnosticMeta(d: Diagnostic, beforeFix: () => void): HTMLElement {
+    const meta = el('div', 'diag-meta', el('code', 'rule', d.rule), ` Ln ${d.range.from.line + 1}, Col ${d.range.from.col + 1}`);
     if (d.docs) {
-        const a = document.createElement('a');
+        const a = el('a', 'docs-link', 'Docs');
         a.href = d.docs;
         a.target = '_blank';
         a.rel = 'noopener';
-        a.textContent = 'docs';
+        a.title = 'Open the AutoHotkey documentation for this';
         a.onclick = e => e.stopPropagation();
         meta.append(' · ', a);
     }
     if (d.fix) {
-        const btn = document.createElement('button');
-        btn.className = 'fix-btn';
-        btn.textContent = `Fix: ${d.fix.title}`;
-        btn.title = 'Apply this change to the code (Ctrl+Z undoes it)';
-        btn.onclick = e => { e.stopPropagation(); hideHint(); applyFix(d); };
+        const btn = el('button', 'fix-btn', `Fix: ${d.fix.title}`);
+        btn.title = 'Apply this change; undo it with (Ctrl+Z)';
+        btn.onclick = e => { e.stopPropagation(); beforeFix(); applyFix(d); };
         btn.onkeydown = e => e.stopPropagation();
-        meta.append(' ', btn);
+        meta.append(btn);
     }
+    return meta;
+}
+
+function problemElement(d: Diagnostic, tag: 'li' | 'div'): HTMLElement {
+    const el = document.createElement(tag);
+    el.className = `problem sev-${d.severity}`;
+    el.tabIndex = 0;
+    const icon = severityIcon(d.severity);
+    icon.classList.add('icon');
+    icon.setAttribute('aria-label', d.severity);
+    icon.removeAttribute('aria-hidden');
+    const msg = document.createElement('span');
+    msg.className = 'msg';
+    msg.textContent = d.message;
+    const meta = diagnosticMeta(d, () => hideHint());
+    meta.classList.add('meta');
+    el.append(icon, msg, meta);
     el.onclick = () => { hideHint(); goToDiagnostic(d); };
     el.onkeydown = e => { if (e.key === 'Enter') { hideHint(); goToDiagnostic(d); } };
     return el;
@@ -288,12 +293,12 @@ function showHint(line: number, focus = true) {
     hint.setAttribute('aria-label', `Problems on line ${line + 1}`);
     const head = document.createElement('div');
     head.className = 'lint-hint-head';
-    const title = document.createElement('span');
-    title.textContent = `Line ${line + 1}: ${countLabel(list)}`;
-    const close = document.createElement('button');
-    close.className = 'lint-hint-close';
-    close.textContent = '×';
+    const title = el('span', 'lint-hint-title');
+    const kinds = [...new Set(list.map(d => d.severity))].sort((a, b) => SEVERITY_ORDER[a] - SEVERITY_ORDER[b]);
+    title.append(...kinds.map(k => severityIcon(k)), el('strong', '', `Line ${line + 1}`), ` ${countLabel(list)}`);
+    const close = el('button', 'lint-hint-close', '×');
     close.setAttribute('aria-label', 'Close');
+    close.title = 'Close (Esc)';
     close.onclick = hideHint;
     head.append(title, close);
     hint.append(head, ...list.map(d => problemElement(d, 'div')));
@@ -505,7 +510,132 @@ function startRename() {
     input.onblur = () => { if (symbolBar.contains(input)) finish(false); };
 }
 
+// ---------------------------------------------------------------------------
+// Hover cards over code: what a name is, the problems there, and how the parser read it
+
+const hoverTip = new Tip('tip-card tip-hover');
+const editorWrap = editor.getWrapperElement();
+
+const containsPos = (r: SrcRange, p: SrcPos) =>
+    (r.from.line < p.line || r.from.line === p.line && r.from.col <= p.col) && (p.line < r.to.line || p.line === r.to.line && p.col <= r.to.col);
+
+/** Screen box of a range's part on one line. */
+function lineRect(r: SrcRange, line: number): DOMRect {
+    const from = line === r.from.line ? toCM(r.from) : { line, ch: 0 };
+    const to = line === r.to.line ? toCM(r.to) : { line, ch: editor.getLine(line)?.length ?? 0 };
+    const a = editor.charCoords(from, 'window'), b = editor.charCoords(to, 'window');
+    return new DOMRect(a.left, a.top, Math.max(b.left - a.left, 4), a.bottom - a.top);
+}
+
+const KIND_LABEL = (ref: Ref) => {
+    const s = ref.symbol;
+    if (s.kind === 'function') return 'function';
+    if (s.kind === 'class') return 'class';
+    if (s.kind === 'parameter') return 'parameter';
+    return s.scope.kind === 'global' ? 'global variable' : 'local variable';
+};
+
+function symbolSection(ref: Ref): HTMLElement {
+    const sym = ref.symbol;
+    const code = el('div', 'tip-code cm-s-ahk-dark');
+    const head = el('div', 'tip-code-line', el('span', 'tip-kind', `(${KIND_LABEL(ref)}) `));
+    const name = el('span', '', sym.name);
+    name.style.color = sym.kind === 'function' ? '#dcdcaa' : sym.kind === 'class' ? '#4ec9b0' : '#9cdcfe';
+    head.append(name);
+    code.append(head);
+    if (sym.def) {
+        let line = (parsedCode.split('\n')[sym.def.range.from.line] ?? '').replace(/(^|\s+);.*$/, '').trim();
+        if (sym.kind === 'function' || sym.kind === 'class') line = line.replace(/\s*\{\s*$/, '');
+        if (line.length > 90) line = line.slice(0, 89) + '…';
+        const snippet = el('div', 'tip-code-line tip-def');
+        snippet.innerHTML = highlightSnippet(line);
+        snippet.prepend(el('span', 'tip-lineno', String(sym.def.range.from.line + 1)));
+        code.append(snippet);
+    }
+    const writes = sym.refs.filter(r => r.role === 'write' || r.role === 'update').length;
+    const desc = describeSymbol(sym, ref.scope);
+    const text = el('div', 'tip-text', desc[0].toUpperCase() + desc.slice(1),
+        el('span', 'tip-muted', ` · ${sym.refs.length} reference${sym.refs.length === 1 ? '' : 's'}${writes ? `, ${writes} write${writes === 1 ? '' : 's'}` : ''}`));
+    const actions = el('div', 'tip-actions');
+    if (sym.def && sym.def !== ref) {
+        const go = el('button', 'tip-link', 'Go to definition ', kbd('F12'));
+        go.onclick = () => { hoverTip.close(); goToDefinition(ref.range.from); };
+        actions.append(go);
+    }
+    if (sym.def) {
+        const ren = el('button', 'tip-link', 'Rename ', kbd('F2'));
+        ren.onclick = () => {
+            hoverTip.close();
+            editor.focus();
+            editor.setCursor(toCM(ref.range.from));
+            currentRef = ref;
+            startRename();
+        };
+        actions.append(ren);
+    }
+    return el('section', 'tip-section tip-symbol', code, text, actions.childElementCount ? actions : null);
+}
+
+function diagnosticSection(d: Diagnostic): HTMLElement {
+    return el('section', `tip-section tip-diag sev-${d.severity}`, severityIcon(d.severity),
+        el('div', 'tip-diag-body', el('div', 'tip-diag-msg', d.message), diagnosticMeta(d, () => hoverTip.close())));
+}
+
+/** Rules that only wrap a name; the hover footer names the rules above them instead. */
+const NAME_WRAPPERS = new Set(['identifier', 'identifierName', 'memberIdentifier', 'propertyName', 'reservedWord', 'keyword']);
+
+function treeFooter(pos: SrcPos): HTMLElement | null {
+    const node = model.root ? nodeAtPos(model, pos) : null;
+    const chain: ViewNode[] = [];
+    for (let n = node; n && chain.length < 3; n = n.parent) {
+        if (n.kind === 'rule' && (altLabel(n) || !NAME_WRAPPERS.has(n.name))) chain.unshift(n);
+    }
+    if (!chain.length) return null;
+    const footer = el('footer', 'tip-footer', 'Parsed as ');
+    chain.forEach((n, i) => {
+        if (i) footer.append(' › ');
+        footer.append(el('code', i === chain.length - 1 ? 'strong' : '', altLabel(n) ?? n.name));
+    });
+    const show = el('button', 'tip-link', 'Show in tree');
+    show.onclick = () => { hoverTip.close(); select(chain[chain.length - 1], 'crumb'); };
+    footer.append(' ', show);
+    return footer;
+}
+
+function onEditorHover(e: MouseEvent) {
+    if (e.buttons || hint || (e.target as Element).closest('.CodeMirror-gutters')) { hoverTip.close(150); return; }
+    const pos = fromCM(editor.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+    const fresh = parsedCode === editor.getValue();
+    const diags = fresh ? diagnostics.filter(d => containsPos(d.range, pos)) : [];
+    const ref = fresh && scopes ? refAt(scopes, pos) : null;
+    const anchorRange = ref?.range ?? diags[0]?.range;
+    const rect = anchorRange ? lineRect(anchorRange, pos.line) : null;
+    const inside = rect && e.clientX >= rect.left - 2 && e.clientX <= rect.right + 2 && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    if (!inside) { if (!hoverTip.contains(e.relatedTarget as Node | null)) hoverTip.close(180); return; }
+    const key = `${ref?.symbol.key ?? ''}|${diags.map(d => `${d.rule}@${d.range.from.line}:${d.range.from.col}`).join(',')}|${pos.line}`;
+    if (hoverTip.visible && hoverTip.owner === key) { hoverTip.keep(); return; }
+    hoverTip.open(key, () => {
+        const parts: Node[] = [];
+        if (ref) parts.push(symbolSection(ref));
+        for (const d of diags) parts.push(diagnosticSection(d));
+        const footer = treeFooter(pos);
+        if (footer) parts.push(footer);
+        return parts;
+    }, () => rect, hoverTip.visible ? 0 : 380, { placement: 'above', interactive: true });
+}
+
+editorWrap.addEventListener('mousemove', onEditorHover);
+editorWrap.addEventListener('mouseleave', e => { if (!hoverTip.contains(e.relatedTarget as Node | null)) hoverTip.close(180); });
+hoverTip.el.addEventListener('pointerleave', e => { if (!editorWrap.contains(e.relatedTarget as Node | null)) hoverTip.close(180); });
+editor.on('scroll', () => hoverTip.close());
+editor.on('change', () => hoverTip.close());
+editor.on('keydown', (_cm: CodeMirror.Editor, e: KeyboardEvent) => { if (e.key === 'Escape') hoverTip.close(); });
+window.addEventListener('resize', () => hoverTip.close());
+
+installSimpleTips();
+
 editor.on('mousedown', (_cm: CodeMirror.Editor, e: MouseEvent) => {
+    hoverTip.close();
     if (!(e.ctrlKey || e.metaKey) || e.button !== 0) return;
     const pos = fromCM(editor.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
     if (!scopes || !refAt(scopes, pos)?.symbol.def) return;

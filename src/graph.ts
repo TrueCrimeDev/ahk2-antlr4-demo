@@ -18,6 +18,7 @@ const MAX_AUTO_NODES = 2500;
 // What a node is called and how it is colored
 
 import { altLabel } from './labels';
+import { Tip, el } from './tooltip';
 export { altLabel };
 
 export type Category = 'stmt' | 'decl' | 'expr' | 'value' | 'name' | 'directive' | 'struct';
@@ -248,8 +249,7 @@ export class GraphView {
                     g.classList.add(`kind-${gn.main.kind}`);
                     if (gn.main.kind === 'rule') g.classList.add(`cat-${categoryOf(gn.main.name)}`);
                     if (gn.members.length > 1) g.classList.add('merged');
-                    t.textContent = describe(gn);
-                    continue;
+                    g.setAttribute('data-desc', describe(gn)); // Shown in a styled card instead of a browser tooltip.
                 }
             } else if (g?.classList.contains('edge')) {
                 const to = Number(text.split('->')[1]?.slice(1));
@@ -409,6 +409,49 @@ export class GraphView {
         if (g === this.hovered) return;
         this.hovered = g;
         this.cb.onHover?.(g?.main ?? null);
+        if (!g) { this.card.close(80); return; }
+        this.card.open(g, () => this.cardContent(g), () => this.elements.get(g.id)?.getBoundingClientRect() ?? null,
+            this.card.visible ? 0 : 320, { placement: 'below' });
+    }
+
+    private card = new Tip('tip-card tip-graph');
+
+    private cardContent(g: GraphNode): Node[] {
+        const n = g.main;
+        const r = n.range;
+        const where = !r ? '' : r.from.line === r.to.line
+            ? `Line ${r.from.line + 1}, columns ${r.from.col + 1}–${r.to.col}`
+            : `Lines ${r.from.line + 1}–${r.to.line + 1}`;
+        if (n.kind !== 'rule') {
+            const code = el('div', 'tip-code tip-token cm-s-ahk-dark');
+            const span = el('span', '', n.text ? (n.text.length > 300 ? n.text.slice(0, 299) + '…' : n.text) : '(empty)');
+            span.style.color = n.kind === 'error' ? '#f48771' : this.cb.tokenColor?.(n) ?? '#9cdcfe';
+            code.append(span);
+            return [
+                el('div', 'tip-graph-head', el('strong', '', n.kind === 'error' ? 'Error node' : n.name), el('span', 'tip-muted', n.kind === 'error' ? '' : ' token')),
+                code,
+                el('div', 'tip-muted tip-small', where),
+            ];
+        }
+        const cat = categoryOf(n.name);
+        const alt = altLabel(n);
+        const parts: Node[] = [
+            el('div', 'tip-graph-head', el('span', `swatch cat-${cat}`), el('strong', '', alt ?? n.name), alt ? el('span', 'tip-muted', `  ${n.name}`) : null),
+            el('div', 'tip-muted tip-small', CATEGORY_NAMES[cat]),
+        ];
+        if (g.members.length > 1) {
+            const chain = el('div', 'tip-chain', el('span', 'tip-muted', 'Merged chain: '));
+            g.members.forEach((m, i) => {
+                if (i) chain.append(' › ');
+                const label = altLabel(m);
+                chain.append(el('code', m === n ? 'strong' : '', label ? `${m.name} (${label})` : m.name));
+            });
+            parts.push(chain);
+        }
+        const kids = g.children.length;
+        parts.push(el('div', 'tip-small', where, kids ? el('span', 'tip-muted', ` · ${kids} child${kids === 1 ? '' : 'ren'}`) : null));
+        parts.push(el('div', 'tip-hint', 'Click to select its code and focus its subtree'));
+        return parts;
     }
 
     private installHover() {
@@ -425,6 +468,7 @@ export class GraphView {
         host.addEventListener('wheel', e => {
             if (ignore(e)) return;
             e.preventDefault();
+            this.card.close();
             const r = host.getBoundingClientRect();
             if (e.ctrlKey || e.metaKey || !e.shiftKey && Math.abs(e.deltaX) < 1 && e.deltaMode === 0 && Math.abs(e.deltaY) >= 50) {
                 // Mouse wheel and pinch zoom; trackpad two-finger scrolling pans instead.

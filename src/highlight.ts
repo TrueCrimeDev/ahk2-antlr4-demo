@@ -33,6 +33,11 @@ export function highlightRanges(code: string): HighlightRange[] {
     return ranges;
 }
 
+/** HTML for a short snippet, colored with the same classes as the editor. hljs escapes the text. */
+export function highlightSnippet(code: string): string {
+    return hljs.highlight(code, { language: 'ahk2', ignoreIllegals: true }).value;
+}
+
 /** highlight.js classes at a document offset ('' for plain text). */
 export function classesAt(code: string, offset: number): string {
     const ranges = highlightRanges(code);
