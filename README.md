@@ -25,7 +25,7 @@ A fork of [Descolada/ahk2-antlr4-demo](https://github.com/Descolada/ahk2-antlr4-
 - **Node search** across the graph and outline, with Enter / Shift+Enter to step through matches.
 - **Syntax highlighting** with the highlight.js 11.9 grammar and VS Code Dark+ colors from [AHKv2_LLMs](https://truecrimedev.github.io/AHKv2_LLMs/). `src/vendor/highlight-ahk2.js` starts from that repo's copy, with fixes found by checking it against the ANTLR lexer on about 1,300 scripts: keywords in any case, strings that can't run past their line, continuation sections, hotkeys and hotstrings. The header of the file lists the changes.
 - **Lint hints in the gutter.** Click or tap a colored dot next to a line number to see that line's problems, with docs links; click a problem to select its code.
-- Light and dark page themes, a phone layout, and your code and edited examples saved in the browser between visits.
+- The TrueCrimeAudit dark design: an almost-black app bar and editor, charcoal page, #262626 cards, bright blue (#3B82F6) for active and focus states, Inter type, 6px corners and very soft shadows. Graph kinds use the TrueCrimeAudit accents (purple, teal, indigo, orange, cyan, pink). Also a phone layout, and your code and edited examples saved in the browser between visits.
 
 ## Lint rules
 

@@ -194,6 +194,9 @@ export class GraphView {
         this.message = document.createElement('div');
         this.message.className = 'graph-message';
         host.append(this.stage, this.message, this.legend());
+        // Panning moves the stage with a transform; the container itself must never scroll, or the
+        // key slides out of view (scrollIntoView and focus can scroll overflow:hidden boxes).
+        host.addEventListener('scroll', () => { host.scrollLeft = 0; host.scrollTop = 0; });
         this.installPanZoom();
         this.installHover();
     }
