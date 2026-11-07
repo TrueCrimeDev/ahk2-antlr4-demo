@@ -62,11 +62,16 @@ export interface GraphNode {
     main: ViewNode;
     children: GraphNode[];
     parent: GraphNode | null;
+    /** View nodes hidden under this box because it is folded. */
+    hidden?: number;
 }
+
+/** Fold state is keyed by rule and position, so it survives re-parses and merge toggling. */
+export const foldKey = (v: ViewNode) => `${v.name}@${v.range ? `${v.range.from.line}:${v.range.from.col}` : v.id}`;
 
 const isEmptyWrapper = (v: ViewNode) => v.kind === 'rule' && !v.children.length && (v.name === 'eos' || v.name === 's');
 
-export function buildGraph(model: Model, merge: boolean): { nodes: GraphNode[]; byView: Map<number, GraphNode> } {
+export function buildGraph(model: Model, merge: boolean, folded: Set<string> = new Set()): { nodes: GraphNode[]; byView: Map<number, GraphNode> } {
     const nodes: GraphNode[] = [];
     const byView = new Map<number, GraphNode>();
     const visible = (v: ViewNode) => merge ? v.children.filter(c => !isEmptyWrapper(c)) : v.children;
@@ -89,6 +94,14 @@ export function buildGraph(model: Model, merge: boolean): { nodes: GraphNode[]; 
         for (const m of members) byView.set(m.id, g);
         // Hidden wrappers (eos) still map to their parent box, so the cursor and search can find it.
         for (const c of last.children) if (merge && isEmptyWrapper(c)) byView.set(c.id, g);
+        if (folded.has(foldKey(v)) && visible(last).length) {
+            // Folded: everything below maps to this box, so the cursor and search still find it.
+            let count = 0;
+            const stack = [...last.children];
+            while (stack.length) { const d = stack.pop()!; byView.set(d.id, g); count++; stack.push(...d.children); }
+            g.hidden = count;
+            return;
+        }
         for (const c of visible(last)) visit(c, g);
     };
     if (model.root) visit(model.root, null);
@@ -127,6 +140,7 @@ function ruleLabel(g: GraphNode): string {
     if (before) parts.push(caption(before));
     parts.push(`<FONT POINT-SIZE="13" COLOR="${SENTINEL.main}">${esc(altLabel(g.main) ?? g.main.name)}</FONT>`);
     if (after) parts.push(caption(after));
+    if (g.hidden) parts.push(`<FONT POINT-SIZE="10" COLOR="${SENTINEL.caption}">▸ ${g.hidden} hidden</FONT>`);
     return `<${parts.join('<BR/>')}>`;
 }
 
@@ -145,7 +159,7 @@ export function toDot(nodes: GraphNode[], tokenColor: (n: ViewNode) => string = 
     for (const g of nodes) {
         const n = g.main;
         if (n.kind === 'rule') {
-            lines.push(`  g${g.id} [label=${ruleLabel(g)}];`);
+            lines.push(`  g${g.id} [label=${ruleLabel(g)}${g.hidden ? ', style="rounded,filled,dashed"' : ''}];`);
         } else {
             const color = n.kind === 'error' ? '#f48771' : tokenColor(n);
             lines.push(`  g${g.id} [label=${tokenLabel(n, color)}, margin="0.12,0.05", fillcolor="#1e1e1e", color="#3c3c3c"];`);
@@ -187,6 +201,8 @@ export class GraphView {
     private hovered: GraphNode | null = null;
     /** Draw single-child chains as one box. */
     merge = true;
+    /** Boxes whose subtrees are folded away (foldKey of the box's top node). */
+    readonly folded = new Set<string>();
 
     constructor(private host: HTMLElement, private cb: GraphCallbacks) {
         this.stage = document.createElement('div');
@@ -208,7 +224,7 @@ export class GraphView {
         this.edges.clear();
         this.setMessage('');
         this.setHover(null);
-        this.graph = buildGraph(model, this.merge);
+        this.graph = buildGraph(model, this.merge, this.folded);
         if (!model.root) {
             this.stage.replaceChildren();
             this.setMessage('Nothing to show.');
@@ -252,6 +268,7 @@ export class GraphView {
                     g.classList.add(`kind-${gn.main.kind}`);
                     if (gn.main.kind === 'rule') g.classList.add(`cat-${categoryOf(gn.main.name)}`);
                     if (gn.members.length > 1) g.classList.add('merged');
+                    if (gn.hidden) g.classList.add('folded');
                     g.setAttribute('data-desc', describe(gn)); // Shown in a styled card instead of a browser tooltip.
                 }
             } else if (g?.classList.contains('edge')) {
@@ -271,6 +288,44 @@ export class GraphView {
         for (const [cls, ids] of this.classes) for (const id of ids) this.groupEl(id)?.classList.add(cls);
         this.applyFocus();
         if (!this.hasRendered) { this.initialView(); this.hasRendered = true; } else this.apply();
+    }
+
+    get svgElement(): SVGSVGElement | null { return this.svg; }
+
+    /** Fold or unfold the box drawn for a node. Returns false if it has nothing to fold. */
+    toggleFold(node: ViewNode): boolean {
+        const g = this.graph.byView.get(node.id);
+        if (!g) return false;
+        const key = foldKey(g.members[0]);
+        if (this.folded.has(key)) this.folded.delete(key);
+        else if (g.children.length) this.folded.add(key);
+        else return false;
+        this.card.close();
+        if (this.model) void this.render(this.model);
+        return true;
+    }
+
+    isFolded(node: ViewNode): boolean {
+        const g = this.graph.byView.get(node.id);
+        return !!g && this.folded.has(foldKey(g.members[0])) && g.members.includes(node);
+    }
+
+    unfoldAll() {
+        if (!this.folded.size) return;
+        this.folded.clear();
+        if (this.model) void this.render(this.model);
+    }
+
+    /** Fold every box at a depth below the root's children, leaving the top levels open. */
+    foldToDepth(depth: number) {
+        this.folded.clear();
+        const walk = (g: GraphNode, d: number) => {
+            if (d >= depth && g.children.length) { this.folded.add(foldKey(g.members[0])); return; }
+            g.children.forEach(c => walk(c, d + 1));
+        };
+        const all = this.model ? buildGraph(this.model, this.merge) : null;
+        if (all?.nodes[0]) walk(all.nodes[0], 0);
+        if (this.model) void this.render(this.model);
     }
 
     private groupEl(viewId: number): SVGGElement | undefined {
@@ -379,7 +434,7 @@ export class GraphView {
         tok.append(chip, 'Token (code)');
         list.append(tok);
         const note = document.createElement('p');
-        note.textContent = 'Gray text in a box names wrapper rules merged into it. Hover a box for its full chain; click to focus its subtree.';
+        note.textContent = 'Gray text in a box names wrapper rules merged into it. Hover a box for its full chain, click to focus its subtree, double-click to fold it.';
         box.append(summary, list, note);
         return box;
     }
@@ -452,8 +507,9 @@ export class GraphView {
             parts.push(chain);
         }
         const kids = g.children.length;
-        parts.push(el('div', 'tip-small', where, kids ? el('span', 'tip-muted', ` · ${kids} child${kids === 1 ? '' : 'ren'}`) : null));
-        parts.push(el('div', 'tip-hint', 'Click to select its code and focus its subtree'));
+        parts.push(el('div', 'tip-small', where, kids ? el('span', 'tip-muted', ` · ${kids} child${kids === 1 ? '' : 'ren'}`) : null,
+            g.hidden ? el('span', 'tip-muted', ` · ${g.hidden} nodes folded inside`) : null));
+        parts.push(el('div', 'tip-hint', g.hidden ? 'Click to select it; double-click to unfold' : kids ? 'Click to select its code and focus its subtree; double-click to fold it' : 'Click to select its code'));
         return parts;
     }
 
@@ -463,6 +519,12 @@ export class GraphView {
             this.setHover(this.graphNodeAt(e.target));
         });
         this.host.addEventListener('pointerleave', () => this.setHover(null));
+        this.host.addEventListener('dblclick', e => {
+            const g = this.graphNodeAt(e.target);
+            if (!g) return;
+            e.preventDefault();
+            this.toggleFold(g.main);
+        });
     }
 
     private installPanZoom() {

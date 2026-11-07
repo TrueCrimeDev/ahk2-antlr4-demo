@@ -9,9 +9,27 @@ import { TokenView } from './tokens';
 import { Highlighter, classesAt, colorForClasses, highlightSnippet } from './highlight';
 import { Tip, installSimpleTips, severityIcon, el, kbd } from './tooltip';
 import { EXAMPLES, Example, exampleById } from './examples';
-import { analyzeScopes, ScopeInfo, Ref, refAt, describeSymbol } from './scope';
+import { analyzeScopes, ScopeInfo, Ref, refAt, describeSymbol, cmpPos } from './scope';
+import { documentSymbols, callGraph, SymbolItem, CallNode } from './symbols';
+import { SymbolsView, kindBadge } from './symbolsview';
+import { CallsView } from './callsview';
+import { SearchView } from './searchview';
+import { StepsView } from './stepsview';
+import { Palette, Command } from './palette';
+import { expressionAt, evaluationSteps, Step } from './evaluate';
+import { exportSvg, exportPng } from './exportsvg';
+import type { TextEdit } from './parse';
 
-type Tab = 'graph' | 'outline' | 'tokens';
+type Tab = 'graph' | 'outline' | 'tokens' | 'symbols' | 'calls' | 'pattern' | 'steps';
+const TABS: Tab[] = ['graph', 'outline', 'tokens', 'symbols', 'calls', 'pattern', 'steps'];
+const TAB_NAMES: Record<Tab, string> = {
+    graph: 'Graph', outline: 'Outline', tokens: 'Tokens', symbols: 'Symbols', calls: 'Calls', pattern: 'Search', steps: 'Steps',
+};
+
+/** Run an analysis without letting a bug in it take the page down. */
+function safe<T>(what: string, f: () => T, fallback: T): T {
+    try { return f(); } catch (e) { console.error(`${what} failed:`, e); return fallback; }
+}
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const store = {
@@ -34,6 +52,8 @@ const editor = CodeMirror.fromTextArea(inputEl, {
     extraKeys: {
         F12: () => goToDefinition(fromCM(editor.getCursor())),
         F2: () => startRename(),
+        F8: () => stepProblem(1),
+        'Shift-F8': () => stepProblem(-1),
     },
 });
 
@@ -81,7 +101,9 @@ let scopes: ScopeInfo | null = null;
 let model: Model = { root: null, nodes: [] };
 let diagnostics: Diagnostic[] = [];
 let selected: ViewNode | null = null;
-let activeTab: Tab = (store.get('tab') as Tab) || 'graph';
+let activeTab: Tab = TABS.includes(store.get('tab') as Tab) ? store.get('tab') as Tab : 'graph';
+let symbolItems: SymbolItem[] = [];
+let callNodes: CallNode[] = [];
 let graphDirty = true;
 let lastEditAt = 0;
 const collapseBox = $<HTMLInputElement>('showAll');
@@ -99,6 +121,64 @@ graph.merge = mergeBox.checked;
 const outline = new OutlineView($('outline'), { onSelect: n => select(n, 'outline') });
 const tokens = new TokenView($('tokens'), { onSelect: r => highlightRange(r, true) });
 
+/** Select a range in the editor and scroll to it. */
+function goToRange(range: SrcRange, focus = true) {
+    const from = toCM(range.from), to = toCM(range.to);
+    if (focus) editor.focus();
+    editor.setSelection(from, to);
+    editor.scrollIntoView({ from, to }, 80);
+}
+
+const symbolsView = new SymbolsView($('symbols'), { onSelect: item => goToRange(item.range) });
+const callsView = new CallsView($('calls'), { onSelect: r => goToRange(r) });
+
+let ssrMarks: CodeMirror.TextMarker[] = [];
+const searchView = new SearchView($('pattern'), {
+    source: () => result?.tree && parsedCode === editor.getValue() ? { tree: result.tree, code: parsedCode } : null,
+    onSelect: r => { goToRange(r, false); },
+    onMatches: (ranges, current) => {
+        ssrMarks.forEach(m => m.clear());
+        ssrMarks = [];
+        editor.operation(() => ranges.forEach((r, i) => {
+            ssrMarks.push(editor.markText(toCM(r.from), toCM(r.to), { className: i === current ? 'cm-ssr cm-ssr-current' : 'cm-ssr' }));
+        }));
+    },
+    onReplace: edits => applyEditsToEditor(edits, '+replace'),
+});
+
+let stepMarks: CodeMirror.TextMarker[] = [];
+const stepsView = new StepsView($('steps'), {
+    onStep: (step: Step | null, expr: SrcRange | null) => {
+        stepMarks.forEach(m => m.clear());
+        stepMarks = [];
+        if (expr) stepMarks.push(editor.markText(toCM(expr.from), toCM(expr.to), { className: 'cm-step-expr' }));
+        if (step) {
+            const from = toCM(step.range.from), to = toCM(step.range.to);
+            stepMarks.push(editor.markText(from, to, { className: step.warn ? 'cm-step-cur cm-step-warn' : 'cm-step-cur' }));
+            editor.scrollIntoView({ from, to }, 60);
+        }
+    },
+});
+
+/** The expression at the cursor, for the Steps tab. */
+function refreshSteps() {
+    if (activeTab !== 'steps') return;
+    const fresh = result?.tree && parsedCode === editor.getValue();
+    const expr = fresh ? safe('expressionAt', () => expressionAt(result!.tree!, fromCM(editor.getCursor())), null) : null;
+    stepsView.setEvaluation(expr ? safe('evaluationSteps', () => evaluationSteps(expr, parsedCode, scopes), null) : null);
+}
+
+/** Apply edits in one undoable step, from the end of the document backward. */
+function applyEditsToEditor(edits: TextEdit[], origin: string) {
+    if (!edits.length) return;
+    const sorted = [...edits].sort((a, b) => cmpPos(b.range.from, a.range.from));
+    editor.operation(() => {
+        for (const e of sorted) editor.replaceRange(e.text, toCM(e.range.from), toCM(e.range.to), origin);
+    });
+    editor.focus();
+    editor.setCursor(toCM(sorted[sorted.length - 1].range.from));
+}
+
 // ---------------------------------------------------------------------------
 // Parsing and rendering
 
@@ -113,10 +193,18 @@ function update(fresh = false) {
     const banner = $('stale-banner');
     if (result.tree && result.parser) {
         scopes = analyzeScopes(result.tree);
-        diagnostics.push(...lint(result.tree, code, scopes));
+        diagnostics.push(...lint(result.tree, code, scopes, { syntaxErrors: result.diagnostics.some(d => d.severity === 'error') }));
         model = buildModel(result.tree, result.parser, collapseBox.checked);
         banner.hidden = true;
+        const tree = result.tree, sc = scopes;
+        symbolItems = safe('documentSymbols', () => documentSymbols(tree, sc, code), []);
+        symbolsView.setSymbols(symbolItems);
+        const calls = safe('callGraph', () => callGraph(tree, sc), { nodes: [], edges: [] });
+        callNodes = calls.nodes;
+        callsView.setData(calls);
+        if (activeTab === 'calls') void callsView.render();
         refreshViews();
+        searchView.refresh();
     } else {
         // Lexing failed: keep the last good tree on screen while editing.
         if (fresh) { model = { root: null, nodes: [] }; refreshViews(); }
@@ -643,9 +731,22 @@ editor.on('mousedown', (_cm: CodeMirror.Editor, e: MouseEvent) => {
     goToDefinition(pos);
 });
 
+/** The call graph node whose declaration holds the cursor. */
+function callNodeAt(pos: SrcPos): string | null {
+    let best: CallNode | null = null;
+    for (const n of callNodes) {
+        const f = n.full;
+        if (f && cmpPos(f.from, pos) <= 0 && cmpPos(pos, f.to) <= 0 && (!best || cmpPos(f.from, best.full!.from) >= 0)) best = n;
+    }
+    return best?.id ?? null;
+}
+
 function syncCursor(reveal: boolean) {
     const pos = fromCM(editor.getCursor());
     showReferences(pos);
+    symbolsView.markCursor(pos);
+    callsView.markCurrent(callNodeAt(pos));
+    refreshSteps();
     const node = model.root ? nodeAtPos(model, pos) : null;
     const list = node ? [node] : [];
     graph.mark('cur', list);
@@ -698,16 +799,52 @@ $('search-next').onclick = () => step(1);
 function setTab(tab: Tab) {
     activeTab = tab;
     store.set('tab', tab);
-    for (const t of ['graph', 'outline', 'tokens'] as Tab[]) {
+    for (const t of TABS) {
         $(`tab-${t}`).setAttribute('aria-selected', String(t === tab));
         $(t).hidden = t !== tab;
     }
     document.body.dataset.tab = tab;
     if (tab === 'graph') renderGraph();
+    if (tab === 'calls') void callsView.render();
+    searchView.setActive(tab === 'pattern');
+    stepsView.setActive(tab === 'steps');
     if (selected) { if (tab === 'graph') graph.reveal(selected); if (tab === 'outline') outline.reveal(selected); }
     syncCursor(false);
 }
-for (const t of ['graph', 'outline', 'tokens'] as Tab[]) $(`tab-${t}`).onclick = () => setTab(t);
+for (const t of TABS) $(`tab-${t}`).onclick = () => setTab(t);
+// Arrow keys move between tabs, as in other tab lists.
+$('tab-graph').parentElement!.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const i = TABS.indexOf(activeTab) + (e.key === 'ArrowRight' ? 1 : -1);
+    const next = TABS[(i + TABS.length) % TABS.length];
+    setTab(next);
+    $(`tab-${next}`).focus();
+});
+
+$('fold-sel').onclick = () => {
+    if (!selected || !graph.toggleFold(selected)) {
+        exNote.textContent = selected ? 'That box has nothing below it to fold.' : 'Select a box in the graph first, or double-click one to fold it.';
+    }
+};
+$('unfold-all').onclick = () => graph.unfoldAll();
+
+function exportImage(which: 'graph' | 'calls', format: 'svg' | 'png') {
+    const svg = which === 'graph' ? graph.svgElement : callsView.svg;
+    if (!svg) { exNote.textContent = 'There is no graph to export yet.'; return; }
+    const base = which === 'graph' ? 'ahk-syntax-tree' : 'ahk-call-graph';
+    const host = which === 'graph' ? 'view graph' : 'calls-graph';
+    if (format === 'svg') exportSvg(svg, host, `${base}.svg`);
+    else exportPng(svg, host, `${base}.png`).catch(e => { exNote.textContent = `The PNG could not be made: ${e?.message ?? e}. Try SVG instead.`; });
+}
+for (const which of ['graph', 'calls'] as const) {
+    const menu = $<HTMLDetailsElement>(`${which}-export`);
+    menu.querySelectorAll<HTMLButtonElement>('button[data-format]').forEach(b => {
+        b.onclick = () => { menu.open = false; exportImage(which, b.dataset.format as 'svg' | 'png'); };
+    });
+}
+document.addEventListener('pointerdown', e => {
+    document.querySelectorAll<HTMLDetailsElement>('details.menu[open]').forEach(d => { if (!d.contains(e.target as Node)) d.open = false; });
+});
 
 $('zoom-in').onclick = () => graph.zoomBy(1.25);
 $('zoom-out').onclick = () => graph.zoomBy(0.8);
@@ -983,6 +1120,102 @@ editor.on('drop', (_cm: CodeMirror.Editor, e: DragEvent) => {
 });
 window.addEventListener('pagehide', flushSave);
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
+
+// ---------------------------------------------------------------------------
+// Problems: F8 / Shift+F8 and fix all
+
+function stepProblem(dir: number) {
+    if (!diagnostics.length) return;
+    const pos = fromCM(editor.getCursor());
+    const list = dir > 0 ? diagnostics : [...diagnostics].reverse();
+    const next = list.find(d => dir > 0 ? cmpPos(d.range.from, pos) > 0 : cmpPos(d.range.from, pos) < 0) ?? list[0];
+    goToDiagnostic(next);
+    showHint(next.range.from.line, false);
+}
+
+/** Apply every one-click fix that doesn't overlap another. */
+function fixAll(): number {
+    const taken: SrcRange[] = [];
+    const overlaps = (a: SrcRange, b: SrcRange) => !(cmpPos(a.to, b.from) < 0 || cmpPos(b.to, a.from) < 0);
+    const edits = diagnostics.filter(d => d.fix).flatMap(d => {
+        const rs = d.fix!.edits.map(e => e.range);
+        if (rs.some(r => taken.some(t => overlaps(r, t)))) return [];
+        taken.push(...rs);
+        return d.fix!.edits;
+    });
+    hideHint();
+    applyEditsToEditor(edits, '+fix');
+    return edits.length;
+}
+
+// ---------------------------------------------------------------------------
+// Command palette (Ctrl+K)
+
+function paletteCommands(): Command[] {
+    const actions: Command[] = [];
+    const action = (id: string, title: string, run: () => void, extra: Partial<Command> = {}) =>
+        actions.push({ id: 'a:' + id, group: 'action', title, run, ...extra });
+    for (const t of TABS) action(`tab-${t}`, `Show the ${TAB_NAMES[t]} tab`, () => setTab(t), { keywords: `view panel ${t}` });
+    const fixable = diagnostics.filter(d => d.fix).length;
+    if (fixable) action('fix-all', `Fix all problems that have a fix (${fixable})`, () => fixAll(), { keywords: 'lint quick fix' });
+    if (diagnostics.length) {
+        action('next-problem', 'Go to the next problem', () => stepProblem(1), { keys: 'F8' });
+        action('prev-problem', 'Go to the previous problem', () => stepProblem(-1), { keys: 'Shift+F8' });
+    }
+    action('definition', 'Go to definition', () => goToDefinition(fromCM(editor.getCursor())), { keys: 'F12' });
+    action('rename', 'Rename the symbol at the cursor', () => { editor.focus(); startRename(); }, { keys: 'F2' });
+    action('ssr', 'Search and replace by code shape', () => { setTab('pattern'); searchView.focus(); }, { keywords: 'structural find pattern' });
+    action('steps', 'Step through the expression at the cursor', () => { setTab('steps'); editor.focus(); }, { keywords: 'evaluation order debug' });
+    action('filter-symbols', 'Filter symbols', () => { setTab('symbols'); symbolsView.focusFilter(); });
+    action('share', 'Copy a share link for this code', () => shareBtn.click(), { keywords: 'url' });
+    action('open', 'Open a file…', () => fileInput.click(), { keywords: 'load ahk' });
+    action('fit', 'Fit the graph to the view', () => { setTab('graph'); graph.fit(); }, { keywords: 'zoom' });
+    action('fold', 'Fold or unfold the selected box in the graph', () => { setTab('graph'); $('fold-sel').click(); }, { keywords: 'collapse subtree' });
+    action('fold-2', 'Fold the graph below the top levels', () => { setTab('graph'); graph.foldToDepth(3); }, { keywords: 'collapse overview' });
+    action('unfold', 'Unfold the whole graph', () => { setTab('graph'); graph.unfoldAll(); }, { keywords: 'expand' });
+    action('merge', `${mergeBox.checked ? 'Stop merging' : 'Merge'} single-child chains in the graph`, () => { mergeBox.checked = !mergeBox.checked; mergeBox.dispatchEvent(new Event('change')); });
+    action('collapse', `${collapseBox.checked ? 'Show' : 'Hide'} rule nodes with one child`, () => { collapseBox.checked = !collapseBox.checked; collapseBox.dispatchEvent(new Event('change')); }, { keywords: 'collapse terminal' });
+    for (const fmt of ['svg', 'png'] as const) {
+        action(`export-graph-${fmt}`, `Export the syntax tree as ${fmt.toUpperCase()}`, () => { setTab('graph'); renderGraph(); exportImage('graph', fmt); }, { keywords: 'save image download' });
+        action(`export-calls-${fmt}`, `Export the call graph as ${fmt.toUpperCase()}`, () => { setTab('calls'); void callsView.render().then(() => exportImage('calls', fmt)); }, { keywords: 'save image download' });
+    }
+    if (exampleById(current) && isEdited(exampleById(current)!)) action('reset', 'Reset this example', () => exReset.click());
+
+    const symbols: Command[] = [];
+    const walk = (items: SymbolItem[], parent: SymbolItem | null) => {
+        for (const it of items) {
+            const name = parent && parent.kind === 'class' && it.kind !== 'class' ? `${parent.name}.${it.name}` : it.name;
+            symbols.push({
+                id: `s:${it.kind}:${name}:${it.range.from.line}`, group: 'symbol', title: name,
+                detail: `${it.detail ? it.detail + '  ' : ''}line ${it.range.from.line + 1}`, badge: kindBadge(it.kind),
+                run: () => goToRange(it.range),
+            });
+            walk(it.children, it);
+        }
+    };
+    walk(symbolItems, null);
+
+    const examples: Command[] = EXAMPLES.map(ex => ({
+        id: 'e:' + ex.id, group: 'example', title: ex.title, detail: ex.group, keywords: ex.note,
+        run: () => showExample(ex.id, { updateHash: true }),
+    }));
+    return [...actions, ...symbols, ...examples];
+}
+
+const palette = new Palette(paletteCommands);
+const paletteBtn = $('open-palette');
+// Built here: the HTML minifier drops elements that follow an inline SVG in a button.
+paletteBtn.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.6"></circle><path d="M10.4 10.4L14 14"></path></svg>';
+paletteBtn.append(el('span', 'palette-btn-label', 'Go to anything'), kbd('Ctrl+K'));
+paletteBtn.onclick = () => palette.open();
+document.addEventListener('keydown', e => {
+    const key = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (key === 'k' && !e.shiftKey || key === 'p' && e.shiftKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (palette.isOpen) palette.close(); else palette.open(key === 'p' ? '>' : '');
+    }
+}, true);
 
 // ---------------------------------------------------------------------------
 // Wiring

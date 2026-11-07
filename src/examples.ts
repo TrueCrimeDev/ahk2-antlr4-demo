@@ -239,6 +239,49 @@ Val(v) => v
 `,
     },
     {
+        id: 'eval-order',
+        group: LINT,
+        title: 'Evaluation order (open the Steps tab)',
+        note: 'Put the cursor on a line and open Steps to see when each variable is read. The results are what AutoHotkey v2.1 prints.',
+        code: `; Put the cursor on a line, then open the Steps tab to watch AutoHotkey run it.
+; The numbers are what AutoHotkey v2.1 prints for y.
+x := 1, y := x + (x := 5)           ; 10: x is read when + runs, after x := 5
+x := 1, y := (x := 1) + (x := 2)    ; 4: an assignment gives the variable, not a copy
+x := 1, y := F(x) + (x := 5)        ; 6: F(x) runs before x changes
+x := 1, y := x++ + x                ; 3: x++ gives the old value, then x is 2
+x := 1, y := -x + (x := 4)          ; 3: -x is computed right away
+x := 1, y := [x, x := 2]            ; [2, 2]: items are read when the array is built
+x := 3, y := (x || 0) + (x := 5)    ; 10: || gives the variable it picked
+s := "a", y := s " " (s := "b")     ; "a b": s " " is joined right away
+
+F(v) => v
+`,
+    },
+    {
+        id: 'typos-dead-code',
+        group: LINT,
+        title: 'Typos, unused variables and dead code',
+        note: 'Misspelled names get a "Did you mean" fix. Fix all problems at once from the Ctrl+K menu.',
+        code: `#Requires AutoHotkey v2.0
+greeting := "hello"
+MsgBx(greeting)                     ; error: no MsgBx; did you mean MsgBox?
+size := StrLne(greeting)            ; error: did you mean StrLen?
+ToolTip "Size: " size
+
+Average(values) {
+    total := 0
+    cuont := 0                      ; info: cuont is set but never read
+    for v in values
+        total += v
+    return total / values.Length
+    MsgBox "done"                   ; warning: never runs, it comes after return
+}
+
+MsgBox Average([1, 2, 3])
+MsgBox Avrage([4, 5])               ; error: did you mean Average?
+`,
+    },
+    {
         id: 'callback-arity',
         group: LINT,
         title: 'Callback parameter counts',

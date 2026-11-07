@@ -9,7 +9,8 @@
     "test:highlight": "node tests/highlight.test.mjs",
     "check:highlight-corpus": "tsx tests/highlight-corpus.mts",
     "test:lint": "tsx tests/lint.test.mts",
-    "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node18 --minify --legal-comments=none --banner:js='#!/usr/bin/env node' --outfile=cli/ahk-ast.mjs"
+    "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node18 --minify --legal-comments=none --banner:js='#!/usr/bin/env node' --outfile=cli/ahk-ast.mjs",
+    "test:features": "tsx tests/features.test.mts"
   },
   "keywords": [],
   "author": "",

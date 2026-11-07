@@ -2,6 +2,7 @@ import * as Antlr4 from 'antlr4ng';
 import * as P from './parser/AutoHotkeyParser';
 import { rangeOf } from './model';
 import type { SrcPos, SrcRange } from './parse';
+import { BUILTIN_VARIABLE_MAP } from './builtins';
 
 /**
  * Variable scopes, following AutoHotkey v2's rules (checked against 2.1-alpha):
@@ -32,6 +33,8 @@ export interface Scope {
     assigned: Set<string>;
     /** Functions (and, globally, classes) declared directly in this scope. */
     functions: Set<string>;
+    /** A lone "global" line: names not declared local are global (assume-global mode). */
+    assumeGlobal?: boolean;
 }
 
 /**
@@ -182,6 +185,7 @@ export function analyzeScopes(tree: Antlr4.ParseTree): ScopeInfo {
         }
         if (n instanceof P.VariableStatementContext) {
             const kw = n.getChild(0)?.getText().toLowerCase();
+            if (kw === 'global' && !n.variableDeclarationList()?.variableDeclaration().length) scope.assumeGlobal = true;
             for (const decl of n.variableDeclarationList()?.variableDeclaration() ?? []) {
                 const id = decl.assignable()?.identifier();
                 if (!id) continue;
@@ -221,7 +225,8 @@ export function analyzeScopes(tree: Antlr4.ParseTree): ScopeInfo {
         } else if (parent instanceof P.CatchAssignableContext) {
             addRef(id, scope, 'write', 'catch');
         } else if (parent instanceof P.CatchClassesContext) {
-            addRef(id, scope, 'read');
+            // "catch as e" parses "as" as a class name; it is the keyword.
+            if (id.getText().toLowerCase() !== 'as') addRef(id, scope, 'read');
         }
         // Member names, property names and labels are not variables.
     }
@@ -236,11 +241,13 @@ export function analyzeScopes(tree: Antlr4.ParseTree): ScopeInfo {
         if (ref.role === 'param' || ref.role === 'function' || ref.role === 'class') return s;
         if (s.kind === 'global' || s.globals.has(lname)) return global;
         if (s.params.has(lname) || s.locals.has(lname) || s.functions.has(lname)) return s;
+        // Built-in variables (A_Clipboard, A_Index, ...) are never local, even when assigned.
+        if (BUILTIN_VARIABLE_MAP.has(lname) && !s.params.has(lname)) return global;
         for (let p = s.parent; p && p.kind !== 'global'; p = p.parent) {
             if (p.globals.has(lname)) return global;
             if (owns(p, lname)) return p;
         }
-        if (s.assigned.has(lname)) return s;
+        if (s.assigned.has(lname) && !s.assumeGlobal) return s;
         return global;
     };
 

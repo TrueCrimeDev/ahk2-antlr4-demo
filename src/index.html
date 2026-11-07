@@ -29,6 +29,7 @@
                 <a href="https://github.com/TrueCrimeDev/ahk2-antlr4-demo">TrueCrimeDev/ahk2-antlr4-demo</a>
             </p>
         </div>
+        <button id="open-palette" class="palette-btn" title="Jump to a symbol, open an example or run a command (Ctrl+K)">Go to anything</button>
     </header>
 
     <main class="container">
@@ -80,6 +81,11 @@ Pair(a*) => a
                     <button id="tab-graph" role="tab" aria-selected="true">Graph</button>
                     <button id="tab-outline" role="tab" aria-selected="false">Outline</button>
                     <button id="tab-tokens" role="tab" aria-selected="false">Tokens</button>
+                    <span class="tab-sep" aria-hidden="true"></span>
+                    <button id="tab-symbols" role="tab" aria-selected="false" title="Classes, functions, hotkeys and globals">Symbols</button>
+                    <button id="tab-calls" role="tab" aria-selected="false" title="Who calls whom, including callbacks">Calls</button>
+                    <button id="tab-pattern" role="tab" aria-selected="false" title="Search and replace by code shape">Search</button>
+                    <button id="tab-steps" role="tab" aria-selected="false" title="The order an expression runs in">Steps</button>
                 </div>
                 <div class="search only-tree">
                     <input id="search" type="search" placeholder="Find node (e.g. assignment, &quot;x&quot;)" aria-label="Find node">
@@ -93,6 +99,24 @@ Pair(a*) => a
                     <button id="zoom-fit" title="Fit to view">Fit</button>
                     <button id="zoom-100" title="Actual size">1:1</button>
                     <label title="Draw chains of single-child rules as one box"><input type="checkbox" id="merge-chains" checked> Merge chains</label>
+                    <button id="fold-sel" title="Fold or unfold the selected box; double-click a box to do the same">Fold</button>
+                    <button id="unfold-all" title="Show every folded subtree again">Unfold all</button>
+                    <details class="menu" id="graph-export">
+                        <summary title="Save the graph as an image">Export</summary>
+                        <div class="menu-list">
+                            <button data-format="svg">SVG image</button>
+                            <button data-format="png">PNG image (2×)</button>
+                        </div>
+                    </details>
+                </div>
+                <div class="tool-group only-calls">
+                    <details class="menu" id="calls-export">
+                        <summary title="Save the call graph as an image">Export</summary>
+                        <div class="menu-list">
+                            <button data-format="svg">SVG image</button>
+                            <button data-format="png">PNG image (2×)</button>
+                        </div>
+                    </details>
                 </div>
                 <div class="tool-group only-outline">
                     <button id="expand-all">Expand all</button>
@@ -108,6 +132,10 @@ Pair(a*) => a
                 <div id="graph" class="view graph" role="tabpanel" aria-labelledby="tab-graph"></div>
                 <div id="outline" class="view outline" role="tabpanel" aria-labelledby="tab-outline" hidden></div>
                 <div id="tokens" class="view tokens" role="tabpanel" aria-labelledby="tab-tokens" hidden></div>
+                <div id="symbols" class="view panel symbols" role="tabpanel" aria-labelledby="tab-symbols" hidden></div>
+                <div id="calls" class="view panel calls" role="tabpanel" aria-labelledby="tab-calls" hidden></div>
+                <div id="pattern" class="view panel pattern" role="tabpanel" aria-labelledby="tab-pattern" hidden></div>
+                <div id="steps" class="view panel steps" role="tabpanel" aria-labelledby="tab-steps" hidden></div>
             </div>
         </section>
     </main>

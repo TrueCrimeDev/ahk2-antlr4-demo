@@ -7,6 +7,10 @@ import { buildModel, ViewNode } from './model';
 import { altLabel } from './labels';
 import { analyzeScopes, describeSymbol } from './scope';
 import { applyEdits } from './fixes';
+import { compilePattern, findMatches, replaceEdits, fillTemplate } from './search';
+import { documentSymbols, callGraph, SymbolItem } from './symbols';
+import { callsDot } from './callsdot';
+import { expressionAt, evaluationSteps } from './evaluate';
 
 const HELP = `ahk-ast: parse and lint AutoHotkey v2 scripts with Descolada's ANTLR4 grammar.
 
@@ -14,6 +18,10 @@ Usage:
   node ahk-ast.mjs lint [--json] [--fix] [--strict] [--no-info] <file...>
   node ahk-ast.mjs ast [--collapse] <file>
   node ahk-ast.mjs symbols <file>
+  node ahk-ast.mjs outline <file>
+  node ahk-ast.mjs calls [--dot] <file>
+  node ahk-ast.mjs search <pattern> [--replace <template>] [--write] [--json] <file...>
+  node ahk-ast.mjs steps <file> <line>[:<column>]
   node ahk-ast.mjs tokens <file>
   node ahk-ast.mjs rules
 
@@ -24,6 +32,14 @@ lint     Problems as file:line:col: severity rule: message, or JSON with --json.
          Exit code 1 if there are errors (with --strict, warnings too), 2 on bad usage.
 ast      The parse tree as JSON: kind, rule or token name, grammar label, text and range.
 symbols  Variables, functions and classes with their scope and every reference, as JSON.
+outline  Declarations as a tree: classes and their members, functions, hotkeys, globals.
+calls    The call graph as JSON, or Graphviz DOT with --dot. Callbacks registered with
+         SetTimer, OnEvent, Hotkey and the like are edges too.
+search   Find code by shape. $name in the pattern matches any expression, $$name the
+         rest of an argument list: search 'SetTimer($fn, $ms)' script.ahk
+         --replace fills a template from each match; --write saves the files.
+steps    The order AutoHotkey runs the expression at a line (and column), with the
+         reads that see a variable changed after it appeared.
 tokens   The token stream the parser reads, as JSON.
 rules    The lint rules.
 
@@ -42,7 +58,7 @@ const pos = (r: SrcRange) => ({ line: r.from.line + 1, column: r.from.col + 1, e
 function analyze(code: string) {
     const result = parseSource(code);
     const diagnostics: Diagnostic[] = [...result.diagnostics];
-    if (result.tree) diagnostics.push(...lint(result.tree, code));
+    if (result.tree) diagnostics.push(...lint(result.tree, code, undefined, { syntaxErrors: result.diagnostics.some(d => d.severity === 'error') }));
     diagnostics.sort((a, b) => a.range.from.line - b.range.from.line || a.range.from.col - b.range.from.col);
     return { result, diagnostics };
 }
@@ -130,6 +146,82 @@ function cmdSymbols(file: string): number {
     return 0;
 }
 
+function cmdOutline(file: string): number {
+    const code = readInput(file);
+    const { result } = analyze(code);
+    if (!result.tree) return 1;
+    const toJson = (s: SymbolItem): unknown => ({
+        kind: s.kind, name: s.name, ...(s.detail ? { detail: s.detail } : {}), ...(s.isStatic ? { static: true } : {}),
+        ...pos(s.range), ...(s.children.length ? { children: s.children.map(toJson) } : {}),
+    });
+    console.log(JSON.stringify(documentSymbols(result.tree, analyzeScopes(result.tree), code).map(toJson), null, 2));
+    return 0;
+}
+
+function cmdCalls(file: string, flags: Set<string>): number {
+    const { result } = analyze(readInput(file));
+    if (!result.tree) return 1;
+    const g = callGraph(result.tree, analyzeScopes(result.tree));
+    if (flags.has('--dot')) { console.log(callsDot(g)); return 0; }
+    console.log(JSON.stringify({
+        nodes: g.nodes.map(n => ({ id: n.id, kind: n.kind, label: n.label, ...(n.range ? pos(n.range) : {}) })),
+        edges: g.edges.map(e => ({ from: e.from, to: e.to, via: e.via, count: e.count, ...(e.guess ? { byNameOnly: true } : {}) })),
+    }, null, 2));
+    return 0;
+}
+
+function cmdSearch(pattern: string, files: string[], flags: Set<string>, replace: string | null): number {
+    const pat = compilePattern(pattern);
+    if (typeof pat === 'string') { console.error(pat); return 2; }
+    let total = 0;
+    const json: unknown[] = [];
+    for (const file of files) {
+        const code = readInput(file);
+        const { result } = analyze(code);
+        if (!result.tree) continue;
+        const matches = findMatches(result.tree, pat, code);
+        total += matches.length;
+        const lines = code.split('\n');
+        for (const m of matches) {
+            const text = lines[m.range.from.line] ?? '';
+            if (flags.has('--json')) {
+                json.push({ file, ...pos(m.range), bindings: Object.fromEntries([...m.bindings].map(([k, v]) => [k, v.text])), ...(replace !== null ? { replacement: fillTemplate(replace, m) } : {}) });
+            } else {
+                console.log(`${file}:${m.range.from.line + 1}:${m.range.from.col + 1}: ${text.trim()}`);
+                if (replace !== null) console.log(`  -> ${fillTemplate(replace, m)}`);
+            }
+        }
+        if (replace !== null && flags.has('--write') && matches.length && file !== '-') {
+            writeFileSync(file, applyEdits(code, replaceEdits(matches, replace)));
+            console.error(`${file}: replaced ${matches.length} match${matches.length === 1 ? '' : 'es'}`);
+        }
+    }
+    if (flags.has('--json')) console.log(JSON.stringify(json, null, 2));
+    else console.error(`${total} match${total === 1 ? '' : 'es'}`);
+    return total ? 0 : 1;
+}
+
+function cmdSteps(file: string, at: string): number {
+    const m = /^(\d+)(?::(\d+))?$/.exec(at ?? '');
+    if (!m) { console.error('steps: give a line number, or line:column, after the file.'); return 2; }
+    const code = readInput(file);
+    const { result } = analyze(code);
+    if (!result.tree) return 1;
+    const line = Number(m[1]) - 1;
+    let col = m[2] ? Number(m[2]) - 1 : (code.split('\n')[line] ?? '').search(/\S/);
+    if (col < 0) col = 0;
+    const expr = expressionAt(result.tree, { line, col });
+    if (!expr) { console.error(`No expression at ${line + 1}:${col + 1}.`); return 1; }
+    const ev = evaluationSteps(expr, code, analyzeScopes(result.tree));
+    console.log(ev.code.split('\n')[0]);
+    ev.steps.forEach((s, i) => {
+        console.log(`${String(i + 1).padStart(3)}. ${'   '.repeat(s.depth)}${s.title}   ${s.code}${s.when ? `   (${s.when})` : ''}`);
+        if (s.warn) console.log(`     ${'   '.repeat(s.depth)}warning: ${s.warn}`);
+    });
+    if (ev.result) console.log(ev.result);
+    return 0;
+}
+
 function cmdTokens(file: string): number {
     const { result } = analyze(readInput(file));
     const names = result.parser?.vocabulary;
@@ -140,7 +232,14 @@ function cmdTokens(file: string): number {
 }
 
 function main(argv: string[]): number {
-    const [cmd, ...rest] = argv;
+    const [cmd, ...args] = argv;
+    let replace: string | null = null;
+    const rest: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--replace') { replace = args[++i] ?? ''; continue; }
+        if (args[i].startsWith('--replace=')) { replace = args[i].slice('--replace='.length); continue; }
+        rest.push(args[i]);
+    }
     const flags = new Set(rest.filter(a => a.startsWith('--')));
     const files = rest.filter(a => !a.startsWith('--'));
     if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') { console.log(HELP); return cmd ? 0 : 2; }
@@ -154,6 +253,12 @@ function main(argv: string[]): number {
             case 'lint': return cmdLint(files, flags);
             case 'ast': return cmdAst(files[0], flags);
             case 'symbols': return cmdSymbols(files[0]);
+            case 'outline': return cmdOutline(files[0]);
+            case 'calls': return cmdCalls(files[0], flags);
+            case 'search':
+                if (files.length < 2) { console.error('search: give a pattern and at least one file.'); return 2; }
+                return cmdSearch(files[0], files.slice(1), flags, replace);
+            case 'steps': return cmdSteps(files[0], files[1]);
             case 'tokens': return cmdTokens(files[0]);
         }
     } catch (e: any) {

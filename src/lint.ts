@@ -7,10 +7,17 @@ import {
     PreIncrementDecrementExpressionContext, PrimaryExpressionContext, SingleExpressionContext, VarRefExpressionContext,
     ConcatenateExpressionContext, RelationalExpressionContext, PropertyAssignmentContext, MethodDefinitionContext,
     PropertyDefinitionContext, BlockContext, HotkeyContext, HotstringContext, FunctionBodyContext, StatementContext,
+    LogicalAndExpressionContext, LogicalOrExpressionContext, TernaryExpressionContext, CoalesceExpressionContext, ArrayLiteralContext, ObjectLiteralContext,
 } from './parser/AutoHotkeyParser';
 import { Diagnostic, Fix, SrcPos, SrcRange } from './parse';
 import { rangeOf } from './model';
 import { analyzeScopes, ScopeInfo, Scope, Ref } from './scope';
+import { BUILTIN_CLASS_MAP, BUILTIN_FUNCTION_MAP, BUILTIN_VARIABLE_MAP, isBuiltin } from './builtins';
+import {
+    SourceElementsContext, StatementListContext, SourceElementContext, ReturnStatementContext,
+    ThrowStatementContext, BreakStatementContext, ContinueStatementContext, GotoStatementContext, LabelledStatementContext,
+    DirectiveContext, RemapContext, HotstringDirectiveContext, ExpressionStatementContext,
+} from './parser/AutoHotkeyParser';
 
 const DOCS = 'https://www.autohotkey.com/docs/alpha/';
 
@@ -19,8 +26,8 @@ export interface LintRuleInfo { id: string; title: string; description: string }
 export const LINT_RULES: LintRuleInfo[] = [
     {
         id: 'arg-alias',
-        title: 'Argument changed before the call',
-        description: 'A plain variable passed as an argument is not read until the call runs, so another argument that assigns or increments it changes what the function receives.',
+        title: 'Variable read after it changes',
+        description: 'A plain variable passed as an argument, used as an operand, or put in an array or object literal is not read until the call, operator or literal runs, so a later part that assigns or increments it changes the value used. With x = 1, Pair(x, x := 2) passes 2 and x + (x := 5) gives 10.',
     },
     {
         id: 'callback-arity',
@@ -48,6 +55,21 @@ export const LINT_RULES: LintRuleInfo[] = [
         description: 'AutoHotkey v2.1 throws TypeError ("Expected a Number but got a String") when < > <= >= get a non-numeric string. Use StrCompare(a, b) < 0.',
     },
     {
+        id: 'undefined-name',
+        title: 'Name that is never defined',
+        description: 'A name that is read or called but never assigned, defined or built in. AutoHotkey warns at load ("This global variable appears to never be assigned a value") and throws UnsetError when the line runs. Usually a typo; the fix offers the closest name.',
+    },
+    {
+        id: 'unused-variable',
+        title: 'Local assigned but never used',
+        description: 'A local variable that a function, method or hotkey assigns but never reads.',
+    },
+    {
+        id: 'unreachable',
+        title: 'Code that never runs',
+        description: 'Lines after return, throw, break, continue, goto, Exit or ExitApp in the same block, with no label in between.',
+    },
+    {
         id: 'space-index',
         title: 'Space before [ indexes',
         description: 'AutoHotkey reads value [1] as value[1], even with the space, so "Total: " [1, 2].Length indexes the string instead of joining. This grammar shows a concatenation there.',
@@ -55,13 +77,14 @@ export const LINT_RULES: LintRuleInfo[] = [
 ];
 
 /** Lint a parse tree. `code` is the source it came from, used to build fixes. */
-export function lint(tree: Antlr4.ParseTree, code = '', scopes: ScopeInfo = analyzeScopes(tree)): Diagnostic[] {
+export function lint(tree: Antlr4.ParseTree, code = '', scopes: ScopeInfo = analyzeScopes(tree), opts: { syntaxErrors?: boolean } = {}): Diagnostic[] {
     const out: Diagnostic[] = [];
     const src = new Source(code);
     const functions = collectFunctions(tree);
     const stored = collectStoredFunctions(tree, functions);
     walk(tree, node => {
         if (node instanceof ArgumentsContext) checkArgAlias(node, out);
+        checkOperandAlias(node, out);
         if (node instanceof FunctionCallAccessContext) {
             const parent = node.parent;
             if (parent instanceof AccessExpressionContext) {
@@ -79,7 +102,174 @@ export function lint(tree: Antlr4.ParseTree, code = '', scopes: ScopeInfo = anal
         return true;
     });
     checkScopes(scopes, out, src);
+    checkUndefinedAndUnused(tree, scopes, out, !!opts.syntaxErrors);
+    checkUnreachable(tree, out);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Rules: undefined-name, unused-variable
+
+/** Optimal string alignment distance (Levenshtein plus adjacent swaps), case-insensitive. */
+export function editDistance(a: string, b: string): number {
+    a = a.toLowerCase(); b = b.toLowerCase();
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+        for (let j = 1; j <= b.length; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+            if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+        }
+    }
+    return d[a.length][b.length];
+}
+
+/** The closest known name, if it is close enough to be a likely typo. */
+export function closestName(name: string, candidates: Iterable<string>): string | null {
+    let best: string | null = null, bestD = Infinity;
+    const limit = Math.min(2, Math.max(1, Math.floor(name.length / 3)));
+    for (const c of candidates) {
+        if (c.toLowerCase() === name.toLowerCase()) continue;
+        if (Math.abs(c.length - name.length) > limit) continue;
+        const dist = editDistance(name, c);
+        if (dist <= limit && dist < bestD) { best = c; bestD = dist; }
+    }
+    return best;
+}
+
+function checkUndefinedAndUnused(tree: Antlr4.ParseTree, info: ScopeInfo, out: Diagnostic[], syntaxErrors: boolean) {
+    // Where names are called, and whether other files can add definitions. After a syntax error the
+    // parser's recovery can drop definitions, so undefined names are only reported for clean parses.
+    const calls = new Set<string>();
+    let includes = false;
+    let broken = syntaxErrors;
+    const key = (p: SrcPos) => `${p.line}:${p.col}`;
+    walk(tree, n => {
+        if (n instanceof DirectiveContext && /^#include/i.test(n.getText())) includes = true;
+        if (n instanceof Antlr4.ErrorNode) broken = true;
+        let callee: PrimaryExpressionContext | null = null;
+        if (n instanceof FunctionStatementContext) callee = n.primaryExpression();
+        else if (n instanceof FunctionCallAccessContext && n.parent instanceof AccessExpressionContext) callee = n.parent.primaryExpression();
+        if (callee instanceof IdentifierExpressionContext) {
+            const r = rangeOf(callee);
+            if (r) calls.add(key(r.from));
+        }
+        return true;
+    });
+
+    const scriptNames = (scope: Scope, wantCallable: boolean) => {
+        const names: string[] = [];
+        for (const sym of info.symbols.values()) {
+            if (!sym.def) continue;
+            if (wantCallable && sym.kind !== 'function' && sym.kind !== 'class') continue;
+            // Visible from here: the global scope, or this scope and the functions around it.
+            let visible = sym.scope.kind === 'global';
+            for (let s: Scope | null = scope; s && !visible; s = s.parent) visible = s === sym.scope;
+            if (visible) names.push(sym.name);
+        }
+        return names;
+    };
+
+    for (const sym of info.symbols.values()) {
+        const name = sym.refs[0]?.name ?? sym.name;
+        if (!broken && sym.scope.kind === 'global' && sym.kind === 'variable' && !sym.def && !isBuiltin(name)) {
+            for (const ref of sym.refs) {
+                const isCall = calls.has(key(ref.range.from));
+                const candidates = isCall
+                    ? [...scriptNames(ref.scope, true), ...BUILTIN_FUNCTION_MAP.values(), ...BUILTIN_CLASS_MAP.values()]
+                    : [...scriptNames(ref.scope, false), ...BUILTIN_VARIABLE_MAP.values()];
+                const guess = closestName(ref.name, candidates);
+                const elsewhere = includes ? ' It may come from an #Include file, which this page can\'t see.' : '';
+                out.push({
+                    severity: includes ? 'info' : isCall ? 'error' : 'warning', rule: 'undefined-name', range: ref.range,
+                    message: (isCall
+                        ? `${ref.name} isn't a function, class or variable defined anywhere. AutoHotkey warns at load ("This global variable appears to never be assigned a value") and throws UnsetError when this line runs.`
+                        : `${ref.name} is never assigned anywhere, so reading it throws UnsetError ("This global variable has not been assigned a value").`)
+                        + (guess ? ` Did you mean ${guess}?` : '') + elsewhere,
+                    fix: guess ? { title: `Change to ${guess}`, edits: [{ range: ref.range, text: guess }] } : undefined,
+                });
+            }
+        }
+        // Locals that are set but never read.
+        if (sym.scope.kind !== 'global' && sym.kind === 'variable' && sym.refs.length
+            && sym.refs.every(r => r.role === 'write' && r.op === ':=' || r.role === 'declare')
+            && sym.refs.some(r => r.role === 'write') && !sym.scope.globals.has(sym.refs[0].lname)) {
+            const first = sym.refs.find(r => r.role === 'write')!;
+            const owner = scopeLabel(sym.scope);
+            out.push({
+                severity: 'info', rule: 'unused-variable', range: first.range,
+                message: `${first.name} is assigned in ${owner} but never used${sym.refs.length > 1 ? ` (${sym.refs.length} assignments)` : ''}.`,
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: unreachable
+
+/** The statement or declaration inside sourceElement/statement wrappers. */
+function innerStatement(n: Antlr4.ParseTree): Antlr4.ParseTree {
+    while ((n instanceof SourceElementContext || n instanceof StatementContext) && n.getChildCount() >= 1) {
+        const inner = Array.from({ length: n.getChildCount() }, (_, i) => n.getChild(i)!).find(c => !(c instanceof Antlr4.TerminalNode));
+        if (!inner) break;
+        n = inner;
+    }
+    return n;
+}
+
+const isDeclaration = (n: Antlr4.ParseTree) => n instanceof FunctionDeclarationContext || n instanceof ClassDeclarationContext
+    || n instanceof HotkeyContext || n instanceof HotstringContext || n instanceof DirectiveContext || n instanceof RemapContext
+    || n instanceof HotstringDirectiveContext || (n instanceof ExpressionStatementContext && /^\w+\([^)]*\)=>/.test(n.getText()) && isNamedArrow(n));
+
+function isNamedArrow(n: ExpressionStatementContext): boolean {
+    const e = n.expressionSequence()?.singleExpression(0);
+    return e instanceof FatArrowExpressionContext && !!e.fatArrowExpressionHead().functionExpressionHead()?.functionHead();
+}
+
+function exitKind(n: Antlr4.ParseTree): string | null {
+    if (n instanceof ReturnStatementContext) return 'return';
+    if (n instanceof ThrowStatementContext) return 'throw';
+    if (n instanceof BreakStatementContext) return 'break';
+    if (n instanceof ContinueStatementContext) return 'continue';
+    if (n instanceof GotoStatementContext) return 'goto';
+    if (n instanceof FunctionStatementContext || n instanceof ExpressionStatementContext) {
+        const first = (n as Antlr4.ParserRuleContext).start?.text?.toLowerCase();
+        const text = n.getText().toLowerCase();
+        if ((first === 'exitapp' || first === 'exit') && /^(exitapp|exit)(\(|$|[^\w.:=])/.test(text)) return first === 'exit' ? 'Exit' : 'ExitApp';
+    }
+    return null;
+}
+
+function checkUnreachable(tree: Antlr4.ParseTree, out: Diagnostic[]) {
+    walk(tree, n => {
+        if (!(n instanceof SourceElementsContext || n instanceof StatementListContext)) return true;
+        let exit: { kind: string; line: number } | null = null;
+        let run: SrcRange | null = null;
+        const flush = () => {
+            if (run && exit) out.push({
+                severity: 'warning', rule: 'unreachable', range: run,
+                message: `This never runs: it comes after ${exit.kind} on line ${exit.line} with no label in between.`,
+            });
+            run = null;
+        };
+        for (let i = 0; i < n.getChildCount(); i++) {
+            const child = n.getChild(i)!;
+            if (!(child instanceof SourceElementContext || child instanceof StatementContext)) continue; // eos markers hold comments
+            const inner = innerStatement(child);
+            if (inner instanceof Antlr4.TerminalNode) continue;
+            if (inner instanceof LabelledStatementContext) { flush(); exit = null; continue; }
+            const r = rangeOf(inner);
+            if (!r || !inner.getText().trim()) continue;
+            if (exit && !isDeclaration(inner)) run = run ? { from: run.from, to: r.to } : r;
+            if (!exit) {
+                const k = exitKind(inner);
+                if (k) exit = { kind: k, line: r.from.line + 1 };
+            }
+        }
+        flush();
+        return true;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -197,16 +387,83 @@ function checkArgAlias(args: ArgumentsContext, out: Diagnostic[]) {
                 : w.kind === 'increment' ? `changes it with ${w.op},` : `assigns it with ${w.op},`;
             const range = rangeOf(victim.arg);
             if (!range) continue;
+            const inArray = args.parent instanceof ArrayLiteralContext;
             out.push({
                 severity: 'warning', rule: 'arg-alias', range,
-                docs: DOCS + 'Functions.htm#param',
-                message: `Argument ${victim.index + 1} passes the variable ${name}, which isn't read until the call runs. `
-                    + `Argument ${other.index + 1} ${how} so the function receives the changed value. `
-                    + `To pass the current value, copy it first or wrap it, e.g. Val(${name}) with Val(v) => v.`,
+                docs: DOCS + (inArray ? 'lib/Array.htm' : 'Functions.htm#param'),
+                message: inArray
+                    ? `Item ${victim.index + 1} is the variable ${name}, which isn't read until the array is built. `
+                        + `Item ${other.index + 1} ${how} so the array gets the changed value. In AutoHotkey, x := 1, a := [x, x := 2] gives [2, 2].`
+                    : `Argument ${victim.index + 1} passes the variable ${name}, which isn't read until the call runs. `
+                        + `Argument ${other.index + 1} ${how} so the function receives the changed value. `
+                        + `To pass the current value, copy it first or wrap it, e.g. Val(${name}) with Val(v) => v.`,
             });
             break;
         }
     }
+}
+
+/**
+ * The same late read applies to operators, compound assignment and object literals: a plain
+ * variable operand is read when the operator runs, after everything to its right has run.
+ * Checked on AutoHotkey 2.1-alpha.32 and .37: with x = 1, x + (x := 5) gives 10 and
+ * x += (x := 5) gives 10, while x * 10 + (x := 3) gives 13 (the * runs before x changes).
+ */
+function checkOperandAlias(node: Antlr4.ParseTree, out: Diagnostic[]) {
+    const describe = (w: Write, name: string) => w.kind === 'ref' ? `passes &${name}` : w.kind === 'increment' ? `changes it with ${w.op}` : `assigns it with ${w.op}`;
+    if (node instanceof AssignmentExpressionContext) {
+        const op = node.assignmentOperator().getText();
+        const target = node.primaryExpression();
+        if (op === ':=' || !(target instanceof IdentifierExpressionContext)) return;
+        const name = target.getText();
+        const writes = writesTo(node.singleExpression(), name);
+        const range = rangeOf(node);
+        if (!writes.length || !range) return;
+        out.push({
+            severity: 'warning', rule: 'arg-alias', range,
+            message: `${name} ${op} reads ${name} after the right side runs, and the right side ${describe(writes[0], name)}, `
+                + `so the result is built from the new value. In AutoHotkey, x := 1, x += (x := 5) leaves x = 10.`,
+        });
+        return;
+    }
+    if (node instanceof ObjectLiteralContext) {
+        const values = [...node.propertyAssignment()].map(p => p.singleExpression());
+        values.forEach((v, i) => {
+            const name = deferredVar(v);
+            if (!name) return;
+            const later = values.slice(i + 1).flatMap(o => o ? writesTo(o, name) : []);
+            const range = rangeOf(v!);
+            if (!later.length || !range) return;
+            out.push({
+                severity: 'warning', rule: 'arg-alias', range,
+                message: `This value is the variable ${name}, which isn't read until the object is built. A later property ${describe(later[0], name)}, `
+                    + `so the object gets the changed value. In AutoHotkey, x := 1, o := {p: x, q: x := 2} sets p to 2.`,
+            });
+        });
+        return;
+    }
+    // Binary operators: two operand expressions with an operator token between them.
+    if (!(node instanceof SingleExpressionContext) || node instanceof LogicalAndExpressionContext || node instanceof LogicalOrExpressionContext
+        || node instanceof CoalesceExpressionContext || node instanceof TernaryExpressionContext || node instanceof FatArrowExpressionContext) return;
+    const operands = [] as SingleExpressionContext[];
+    let opText = '';
+    for (let i = 0; i < node.getChildCount(); i++) {
+        const c = node.getChild(i)!;
+        if (c instanceof SingleExpressionContext) operands.push(c);
+        else if (c instanceof Antlr4.TerminalNode && c.getText().trim() && !opText) opText = c.getText();
+    }
+    if (operands.length !== 2) return;
+    const name = deferredVar(operands[0]);
+    if (!name) return;
+    const writes = writesTo(operands[1], name);
+    const range = rangeOf(operands[0]);
+    if (!writes.length || !range) return;
+    const op = opText || 'the concatenation';
+    out.push({
+        severity: 'warning', rule: 'arg-alias', range,
+        message: `${name} isn't read until ${op === 'the concatenation' ? op : op + ' runs'}, and the right side ${describe(writes[0], name)} first, `
+            + `so this uses the new value. In AutoHotkey, x := 1, y := x + (x := 5) gives 10, not 6. Copy it first if you need the old value.`,
+    });
 }
 
 // ---------------------------------------------------------------------------
